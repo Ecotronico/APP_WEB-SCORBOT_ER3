@@ -60,4 +60,4 @@ md5sum -c MD5SUMS.txt
 
 ## Referencias
 
-Protocolo de comunicación basado en el manual del fabricante del SCORBOT ER III (Eshed Robotec). El manual no se incluye en este repositorio por tratarse de documentación con derechos del fabricante.
+Protocolo de comunicación basado en el manual del fabricante del SCORBOT ER III (Eshed Robotec). El manual no se incluye en este repositorio, puede ser localizado en la WWW.
