@@ -8,7 +8,7 @@ Desarrollada como parte de la práctica *Diagnosis y mantenimiento correctivo ·
 
 ## Probar en línea
 
-👉 **https://ecotronico.github.io/scorbot-er3-pendant/**
+👉 **[https://ecotronico.github.io/scorbot-er3-pendant](https://ecotronico.github.io/APP_WEB-SCORBOT_ER3/)/**
 
 Sin brazo conectado puede probarse completa en **modo simulación**, con la controladora virtual y la vista 3D.
 
