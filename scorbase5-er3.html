@@ -1,0 +1,1354 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SCORBASE Nivel 5 · réplica web para SCORBOT-ER III</title>
+<style>
+  :root{color-scheme:dark}
+  html,body{margin:0;background:#0a0a0c;color:#c9c9cf;font:14px/1.45 "Segoe UI",system-ui,sans-serif}
+  #bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 12px;background:#14151a;border-bottom:1px solid #2b2d35}
+  #bar button{font:600 13px "Segoe UI",system-ui,sans-serif;color:#e6e6ea;background:#262932;border:1px solid #3a3d49;border-radius:4px;padding:6px 12px;cursor:pointer}
+  #bar button:hover{background:#30343f}
+  #bar button:focus-visible{outline:2px solid #ffd24a;outline-offset:2px}
+  #bar .stop{background:#a4231a;border-color:#d3463b;color:#fff}
+  #bar .stop:hover{background:#bd2b21}
+  #bar .go{background:#1f6b36;border-color:#2e9150}
+  #badge{margin-left:auto;font:600 12px ui-monospace,Consolas,monospace;padding:4px 9px;border-radius:3px;background:#3a3320;color:#ffd24a}
+  #badge.on{background:#17381f;color:#6fe08b}
+  #stage{background:#000;padding:10px 0}
+  #wrap{position:relative;width:min(100%,1500px);margin:0 auto;overflow:hidden;background:#0000aa}
+  #scr{margin:0;display:inline-block;transform-origin:0 0;white-space:pre;line-height:1.12;
+       font-family:"Cascadia Mono","Consolas","DejaVu Sans Mono","Lucida Console",monospace}
+  #wrap:fullscreen{display:flex;align-items:flex-start;justify-content:flex-start;background:#000}
+  #help{max-width:1100px;margin:0 auto;padding:14px 16px 40px;font-size:13px;color:#9fa2ad}
+  #help b{color:#d8d8de}
+  #help kbd{font:12px ui-monospace,Consolas,monospace;background:#1d1f27;border:1px solid #363947;border-bottom-width:2px;border-radius:3px;padding:1px 5px;color:#e4e4ea}
+  #help .warn{border-left:3px solid #d3463b;padding:6px 10px;background:#1b1214;color:#e8c4c0;margin:10px 0}
+  #help p{margin:6px 0}
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="btnConn" class="go" title="Abre el puerto serie del adaptador USB-RS232 (9600 · 8 bits · sin paridad · 2 de stop)">Conectar puerto serie</button>
+  <button id="btnDisc" title="Cierra el puerto y vuelve a la simulación">Desconectar</button>
+  <button id="btnSim" title="Alterna entre simulación y controladora real">Simulación</button>
+  <button id="btnBrake" class="stop" title="Envía B a todos los motores. No es un paro de emergencia: la parada real es el interruptor MOTOR">B · Freno</button>
+  <button id="btnResume" title="Envía C: completa el movimiento frenado">C · Continuar</button>
+  <button id="btnFull" title="Pantalla completa">Pantalla completa</button>
+  <span id="badge">SIMULACIÓN</span>
+</div>
+<div id="stage"><div id="wrap"><pre id="scr"></pre></div></div>
+<input type="file" id="fileIn" accept=".L5,.l5,.json" hidden>
+<div id="help">
+  <div class="warn"><b>Seguridad.</b> El botón de freno envía <kbd>B</kbd> por el puerto serie: no es un paro de emergencia. La parada real es el interruptor <b>MOTOR</b> de la controladora. Atornilla el brazo, deja libre el radio de trabajo y ten la mano en MOTOR en las primeras pruebas.</div>
+  <p><b>Primera vez con el brazo.</b> En <kbd>F8</kbd> comprueba el sentido de cada eje con <kbd>T</kbd> (mueve 20 pulsos a velocidad 1) y corrige los signos si hace falta. Después haz el referenciado en <kbd>F5</kbd>. Hasta entonces los topes y el guardián de suelo no actúan.</p>
+  <p><b>Teclas.</b> <kbd>F1</kbd>–<kbd>F8</kbd> o la inicial de cada menú. En Teach: <kbd>1</kbd>/<kbd>Q</kbd> a <kbd>7</kbd>/<kbd>U</kbd> mueven los ejes mientras se mantienen pulsadas; comandos de dos letras (<kbd>RP</kbd>, <kbd>GP</kbd>, <kbd>OG</kbd>, <kbd>CG</kbd>, <kbd>CC</kbd>…). <kbd>B</kbd> frena, <kbd>C</kbd> continúa. En simulación, <kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>8</kbd> cambia las entradas.</p>
+  <p><b>Navegador.</b> Web Serial solo existe en Chrome y Edge de escritorio. Los programas y posiciones se guardan en este navegador; usa «Export» en Program Handling para tener un archivo <kbd>.L5</kbd>.</p>
+  <p>Réplica funcional hecha a partir de los manuales públicos del SCORBOT-ER III. No contiene código del software original.</p>
+</div>
+<script>
+'use strict';
+/* ============================================================
+   NÚCLEO · SCORBASE 5 web (réplica) para SCORBOT-ER III
+   Protocolo: Manual ER-III, Apéndice A/B (9600 8N2, ASCII)
+   ============================================================ */
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const clone = o => JSON.parse(JSON.stringify(o));
+
+const DEF_CFG = {
+  geo: { h: 344, d0: 16, L2: 221, L3: 221, Lg: 143 },          // mm
+  ppd: { b: 10.6416, s: 8.5135, e: 8.5132, p: 2.0924, r: 2.0924 }, // pulsos/grado
+  off: { s: 1030, e: -216, p: 135 },                            // contador con brazo horizontal
+  // sentido de la PRIMERA tecla de cada pareja (1,2,3,4,5,6,7,O) en unidades de eje
+  key: { a1: -1, a2: -1, a3: 1, a4: 1, a5: 1, a6: 1, a7: 1, g: 1 },
+  grip: { open: 1500 },        // pulsos de recorrido de la pinza (contador 0 = cerrada)
+  step: 25, period: 120,       // pulsos por ciclo / ms entre ciclos del manejo manual
+  homeSpeed: 3, homeStep: 30, homeProbe: 180, homeMax: 4000,
+  homeDir: [1, 1, 1, 1, 1], homeOfs: [0, 0, 0, 0, 0],
+  floor: { on: true, z: 0, margin: 5 },
+  maxPps: 700                  // solo simulador
+};
+
+/* ---------- cinemática (verificada con las tablas del manual) ---------- */
+const D2R = Math.PI / 180, R2D = 180 / Math.PI;
+function fk(ax, cfg) {                 // ax = [ax1..ax5] en pulsos de SCORBASE
+  const g = cfg.geo, p = cfg.ppd, o = cfg.off;
+  const base = ax[0] / p.b, a2 = (o.s - ax[1]) / p.s, a3 = (ax[2] - o.e) / p.e, a4 = (ax[3] - o.p) / p.p;
+  const r = g.d0 + g.L2 * Math.cos(a2 * D2R) + g.L3 * Math.cos(a3 * D2R) + g.Lg * Math.cos(a4 * D2R);
+  const z = g.h + g.L2 * Math.sin(a2 * D2R) + g.L3 * Math.sin(a3 * D2R) + g.Lg * Math.sin(a4 * D2R);
+  return { x: r * Math.cos(base * D2R), y: r * Math.sin(base * D2R), z, pitch: a4, roll: ax[4] / p.r,
+           a2, a3, elbowZ: g.h + g.L2 * Math.sin(a2 * D2R), wristZ: z - g.Lg * Math.sin(a4 * D2R) };
+}
+function ik(x, y, z, pitch, roll, cfg, ref) { // devuelve [ax1..ax5] o null; ref = ax actual para elegir la rama más cercana
+  const g = cfg.geo, p = cfg.ppd, o = cfg.off;
+  const base = Math.atan2(y, x), r = Math.hypot(x, y);
+  const rw = r - g.d0 - g.Lg * Math.cos(pitch * D2R), zw = z - g.h - g.Lg * Math.sin(pitch * D2R);
+  const d = Math.hypot(rw, zw);
+  if (d > g.L2 + g.L3 - 1e-6 || d < Math.abs(g.L2 - g.L3) + 1e-6) return null;
+  const c = (g.L2 * g.L2 + d * d - g.L3 * g.L3) / (2 * g.L2 * d);
+  const beta = Math.acos(Math.max(-1, Math.min(1, c))), phi = Math.atan2(zw, rw);
+  let best = null, bd = Infinity;
+  for (const s of [1, -1]) {                       // codo arriba / codo abajo
+    const a2 = phi + s * beta;
+    const a3 = Math.atan2(zw - g.L2 * Math.sin(a2), rw - g.L2 * Math.cos(a2));
+    const ax = [Math.round(base * R2D * p.b), Math.round(o.s - a2 * R2D * p.s), Math.round(o.e + a3 * R2D * p.e),
+                Math.round(o.p + pitch * p.p), Math.round(roll * p.r)];
+    const dist = ref ? Math.abs(ax[1] - ref[1]) + Math.abs(ax[2] - ref[2]) : (s === 1 ? 0 : 1);
+    if (dist < bd) { bd = dist; best = ax; }
+  }
+  return best;
+}
+/* ax (7 valores de posición) <-> contadores de motor (1..8) */
+function axToMotors(ax) { // ax[0..6] -> m[1..7]
+  const m = new Array(9).fill(0);
+  m[1] = ax[0]; m[2] = ax[1]; m[3] = ax[2];
+  m[4] = ax[4] + ax[3]; m[5] = ax[4] - ax[3];   // AX4 = (m4-m5)/2 · AX5 = (m4+m5)/2
+  m[6] = ax[5]; m[7] = ax[6];
+  return m;
+}
+function motorsToAx(m) {
+  return [m[1], m[2], m[3], (m[4] - m[5]) / 2, (m[4] + m[5]) / 2, m[6], m[7]];
+}
+
+/* ---------- controlador simulado (mismo protocolo que el real) ---------- */
+class SimIO {
+  constructor(maxPps) {
+    this.isSim = true; this.rx = []; this.maxPps = maxPps || 700;
+    this.reg = new Array(9).fill(0); this.cnt = new Array(9).fill(0); this.spd = new Array(9).fill(0);
+    this.outs = new Array(9).fill(false); this.ins = new Array(9).fill(false);
+    this.stash = null; this.mode = null; this.dig = null; this.num = ''; this.mm = 0;
+    // posición física real respecto al home (para los finales de carrera)
+    this.off = new Array(9).fill(0);
+    for (let m = 1; m <= 5; m++) this.off[m] = Math.round((Math.random() - .5) * 500) + 120 * (Math.random() < .5 ? -1 : 1);
+    this.t0 = Date.now();
+    this.timer = setInterval(() => this.step(), 20);
+  }
+  async open() { return true; }
+  close() { clearInterval(this.timer); }
+  truth(m) { return this.cnt[m] + this.off[m]; }
+  joint(k) { // coordenada articular real del eje k (1..5)
+    if (k <= 3) return this.truth(k);
+    return k === 4 ? (this.truth(4) - this.truth(5)) / 2 : (this.truth(4) + this.truth(5)) / 2;
+  }
+  limit(k) { return k >= 1 && k <= 5 && Math.abs(this.joint(k)) <= 40; }
+  speedFactor(s) { return s === 0 ? 1 : 0.07 + (9 - s) / 8 * 0.6; }
+  step() {
+    const now = Date.now(), dt = Math.min(0.1, (now - this.t0) / 1000); this.t0 = now;
+    for (let m = 1; m <= 8; m++) {
+      if (!this.reg[m]) continue;
+      const mv = Math.min(Math.abs(this.reg[m]), this.maxPps * this.speedFactor(this.spd[m]) * dt + 0.0001);
+      const sg = Math.sign(this.reg[m]);
+      this.cnt[m] += sg * mv; this.reg[m] -= sg * mv;
+      if (Math.abs(this.reg[m]) < 0.5) { this.cnt[m] = Math.round(this.cnt[m]); this.reg[m] = 0; }
+    }
+  }
+  write(str) { for (const ch of str) this.parse(ch); }
+  push(c) { this.rx.push(typeof c === 'number' ? c : c.charCodeAt(0)); }
+  parse(ch) {
+    if (this.mode === 'M') {
+      if (ch === '\r') { const n = parseInt(this.num, 10) || 0; this.reg[this.mm] += n; this.mode = null; } else this.num += ch;
+      return;
+    }
+    if (this.mode === 'V') { this.spd[this.mm] = +ch; if (this.mm === 0) this.spd.fill(+ch); this.mode = null; return; }
+    if (this.mode === 'U') { if (ch === '*') this.mode = null; return; }
+    if (this.dig !== null) {
+      const d = this.dig; this.dig = null;
+      switch (ch) {
+        case 'M': this.mode = 'M'; this.mm = d; this.num = ''; break;
+        case 'V': this.mode = 'V'; this.mm = d; break;
+        case 'S': this.outs[d] = true; break;
+        case 'R': this.outs[d] = false; break;
+        case 'P': this.reg[d] = 0; break;
+        case 'I': this.push(this.ins[d] ? '1' : '0'); break;
+        case 'L': this.push(this.limit(d) ? '1' : '0'); break;
+        case 'Q': case 'Z': { const src = (ch === 'Z' && this.stash) ? this.stash[d] : this.reg[d]; const v = Math.min(16383, Math.round(Math.abs(src)));
+          this.push(0x80 | ((v >> 7) & 0x7f)); this.push(0x80 | (v & 0x7f)); break; }
+      }
+      return;
+    }
+    if (ch >= '0' && ch <= '9') { this.dig = +ch; return; }
+    switch (ch) {
+      case 'B': this.stash = this.reg.slice(); this.reg.fill(0); break;
+      case 'C': if (this.stash) { this.reg = this.stash; this.stash = null; } break;
+      case 'T': this.push(this.reg.every(v => v === 0) ? '1' : '0'); break;
+      case 'E': this.push(this.reg.every(v => Math.abs(v) < 14) ? '1' : '0'); break;
+      case 'A': this.push(this.reg.every(v => v === 0) ? '0' : this.reg.some(v => Math.abs(v) > 14) ? '+' : '-'); break;
+      case 'U': this.mode = 'U'; break;
+    }
+  }
+  flush() { this.rx.length = 0; }
+  async read(n, timeout) {
+    const t = Date.now();
+    while (this.rx.length < n && Date.now() - t < timeout) await sleep(4);
+    return this.rx.splice(0, n);
+  }
+}
+
+/* ---------- puerto serie real (Web Serial) ---------- */
+class SerialIO {
+  constructor() { this.isSim = false; this.rx = []; this.port = null; }
+  async open() {
+    if (!('serial' in navigator)) throw new Error('Este navegador no tiene Web Serial. Usa Chrome o Edge de escritorio.');
+    this.port = await navigator.serial.requestPort();
+    await this.port.open({ baudRate: 9600, dataBits: 8, stopBits: 2, parity: 'none', flowControl: 'none' });
+    this.writer = this.port.writable.getWriter();
+    this.reader = this.port.readable.getReader();
+    this.alive = true;
+    (async () => {
+      try { for (;;) { const { value, done } = await this.reader.read(); if (done) break; for (const b of value) this.rx.push(b); } }
+      catch (e) { /* puerto cerrado */ }
+    })();
+  }
+  async write(str) { await this.writer.write(new TextEncoder().encode(str)); }
+  flush() { this.rx.length = 0; }
+  async read(n, timeout) {
+    const t = Date.now();
+    while (this.rx.length < n && Date.now() - t < timeout) await sleep(4);
+    return this.rx.splice(0, n);
+  }
+  async close() {
+    this.alive = false;
+    try { await this.reader.cancel(); } catch (e) {}
+    try { this.reader.releaseLock(); } catch (e) {}
+    try { this.writer.releaseLock(); } catch (e) {}
+    try { await this.port.close(); } catch (e) {}
+  }
+}
+
+/* ---------- robot: contadores, órdenes, referenciado ---------- */
+class Robot {
+  constructor(io, cfg) {
+    this.io = io; this.cfg = cfg;
+    this.cnt = new Array(9).fill(0);   // contador de cada motor (posición supuesta)
+    this.tgt = new Array(9).fill(0);   // destino ya ordenado
+    this.dir = new Array(9).fill(0);
+    this.spd = new Array(9).fill(-1);
+    this.outs = new Array(9).fill(false);
+    this.homedAxes = [false, false, false, false, false, false]; // índice 1..5
+    this.homed = false; this.homeKind = '';
+    this.braked = false; this.errMotor = 0; this.busy = false;
+    this._ask = Promise.resolve();
+  }
+  get sim() { return this.io.isSim; }
+  ax() { return motorsToAx(this.tgt); }
+  pose() { return fk(this.ax(), this.cfg); }
+  /* --- comunicación --- */
+  async ask(cmd, n = 1) {     // el manual recomienda mandar dos veces y leer la segunda respuesta
+    const run = async () => {
+      this.io.flush();
+      await this.io.write(cmd + cmd);
+      const b = await this.io.read(2 * n, 500);
+      if (b.length < 2 * n) throw new Error('Sin respuesta del controlador (' + cmd + ')');
+      return b.slice(n);
+    };
+    const p = this._ask.then(run, run); this._ask = p.catch(() => {}); return p;
+  }
+  async init() { await this.io.write('X'); for (let m = 1; m <= 8; m++) await this.io.write(m + 'P'); }
+  async done() { return String.fromCharCode((await this.ask('T'))[0]) === '1'; }
+  async input(n) { return String.fromCharCode((await this.ask(n + 'I'))[0]) === '1'; }
+  async limit(n) { return String.fromCharCode((await this.ask(n + 'L'))[0]) === '1'; }
+  async status() { return String.fromCharCode((await this.ask('A'))[0]); }
+  async remainder(m, cmd = 'Q') { const b = await this.ask(m + cmd, 2); return ((b[0] & 0x7f) << 7) | (b[1] & 0x7f); }
+  async output(n, on) { this.outs[n] = on; await this.io.write(n + (on ? 'S' : 'R')); }
+  async setSpeed(m, s) {                 // s: 1..9 o 10 (=máxima, dígito 0)
+    const v = s >= 9.5 ? 0 : Math.min(9, Math.max(1, Math.round(s)));
+    if (this.spd[m] === v) return; this.spd[m] = v;
+    await this.io.write(m + 'V' + v);
+  }
+  async mcmd(m, n) {
+    n = Math.round(n); if (!n) return;
+    await this.io.write(m + 'M' + (n < 0 ? '-' : '+') + Math.abs(n) + '\r');
+    this.tgt[m] += n; this.cnt[m] = this.tgt[m]; this.dir[m] = Math.sign(n);
+  }
+  async brake() { this.braked = true; await this.io.write('B'); }
+  async resume() { this.braked = false; await this.io.write('C'); }
+  async purge() { for (let m = 1; m <= 8; m++) await this.io.write(m + 'P'); }
+  /* tras un freno B: lee lo que faltaba y corrige los contadores */
+  async fixAfterBrake() {
+    for (let m = 1; m <= 8; m++) {
+      if (!this.dir[m]) continue;
+      const r = await this.remainder(m, 'Z');
+      if (r) { this.cnt[m] = this.tgt[m] - this.dir[m] * r; this.pendRes = this.pendRes || {}; this.pendRes[m] = this.tgt[m]; }
+    }
+  }
+  /* espera a que terminen todos los movimientos; detecta motor calado */
+  async waitDone(abort, timeout = 90000) {
+    const t0 = Date.now(); let k = 0;
+    for (;;) {
+      await sleep(40);
+      if (abort && abort()) return { ok: false, aborted: true };
+      if (this.braked) return { ok: false, braked: true };
+      if (await this.done()) { for (let m = 1; m <= 8; m++) this.cnt[m] = this.tgt[m]; return { ok: true }; }
+      if (++k % 4 === 0) {
+        const s = await this.status();
+        if (s >= '1' && s <= '8') {
+          const m = +s, r = await this.remainder(m);
+          await this.io.write(m + 'P');
+          this.cnt[m] = this.tgt[m] - this.dir[m] * r; this.tgt[m] = this.cnt[m];
+          this.errMotor = m; return { ok: false, err: m };
+        }
+      }
+      if (Date.now() - t0 > timeout) { await this.brake(); return { ok: false, timeout: true }; }
+    }
+  }
+  /* --- movimiento por eje (unidades de SCORBASE) --- */
+  axisDeltas(a, d) {
+    const z = new Array(9).fill(0);
+    if (a <= 3) z[a] = d;
+    else if (a === 4) { z[4] = d; z[5] = -d; }
+    else if (a === 5) { z[4] = d; z[5] = d; }
+    else if (a === 6 || a === 7) z[a] = d;
+    return z;
+  }
+  async moveRel(deltas, speed, abort) {
+    const ms = []; for (let m = 1; m <= 8; m++) if (Math.round(deltas[m])) ms.push(m);
+    if (!ms.length) return { ok: true };
+    for (const m of ms) await this.setSpeed(m, speed);
+    const rem = deltas.map(Math.round);
+    while (ms.some(m => rem[m])) {
+      for (const m of ms) { const c = Math.max(-7000, Math.min(7000, rem[m])); if (c) { await this.mcmd(m, c); rem[m] -= c; } }
+      if (ms.some(m => rem[m])) { const r = await this.waitDone(abort); if (!r.ok) return r; }
+    }
+    return { ok: true };
+  }
+  /* impulso sin esperar (manejo manual con tecla pulsada) */
+  async nudge(a, d, speed) {
+    const z = this.axisDeltas(a, d);
+    for (let m = 1; m <= 8; m++) if (z[m]) { await this.setSpeed(m, speed); await this.mcmd(m, z[m]); }
+  }
+  async gotoAx(ax, speed, abort) {      // ax = 7 valores
+    const t = axToMotors(ax), d = new Array(9).fill(0);
+    for (let m = 1; m <= 7; m++) d[m] = t[m] - this.tgt[m];
+    const r = await this.moveRel(d, speed, abort);
+    if (r.ok) { const w = await this.waitDone(abort); return w; }
+    return r;
+  }
+  gripperTarget(open) { return open ? this.cfg.grip.open * this.cfg.key.g : 0; }
+  async gripper(open, abort) {
+    const target = this.gripperTarget(open), d = new Array(9).fill(0);
+    d[8] = target - this.tgt[8];
+    if (open === false) d[8] -= 60 * this.cfg.key.g;       // un poco más para asegurar el cierre
+    const r = await this.moveRel(d, 5, abort);
+    if (r.ok) return this.waitDone(abort);
+    return r;
+  }
+  async gripperZero(abort) {                               // cierra contra el tope y pone el contador a 0
+    const d = new Array(9).fill(0); d[8] = -(this.cfg.grip.open + 200) * this.cfg.key.g;
+    await this.moveRel(d, 3, abort); const r = await this.waitDone(abort);
+    this.tgt[8] = this.cnt[8] = 0; return r;
+  }
+  /* --- referencias --- */
+  setAx(a, v) {                          // declara que el eje a vale v en este instante
+    const ax = this.ax();
+    ax[a - 1] = v; const m = axToMotors(ax);
+    for (let i = 1; i <= 7; i++) { this.tgt[i] = m[i]; this.cnt[i] = m[i]; }
+  }
+  setHomeHere() { for (let m = 1; m <= 7; m++) { this.tgt[m] = 0; this.cnt[m] = 0; } this.homed = true; this.homeKind = 'SOFT'; this.homedAxes.fill(true); }
+  setLevelRef() {                        // brazo extendido y horizontal (referencia manual)
+    const c = this.cfg.off, m = axToMotors([0, c.s, c.e, c.p, 0, 0, 0]);
+    for (let i = 1; i <= 7; i++) { this.tgt[i] = m[i]; this.cnt[i] = m[i]; }
+    this.homed = true; this.homeKind = 'LEVEL'; this.homedAxes.fill(true);
+  }
+  async homeAxis(a, report, abort) {
+    const c = this.cfg, dir0 = c.homeDir[a - 1] || 1;
+    const stepTo = async (delta, until) => {          // avanza en pasos y consulta el final de carrera
+      const S = c.homeStep, sp = c.homeSpeed, sg = Math.sign(delta), pieces = Math.ceil(Math.abs(delta) / S);
+      for (let i = 0; i < pieces; i++) {
+        if (abort && abort()) return 'abort';
+        const d = Math.min(S, Math.abs(delta) - i * S) * sg;
+        await this.moveRel(this.axisDeltas(a, d), sp, abort);
+        const w = await this.waitDone(abort); if (!w.ok) return w.err ? 'stall' : 'abort';
+        if ((await this.limit(a)) === until) return 'hit';
+      }
+      return 'miss';
+    };
+    let found = await this.limit(a), moved = 0;
+    if (!found) {
+      let amp = c.homeProbe; const dirs = [dir0, -dir0];
+      outer: while (amp <= c.homeMax) {
+        for (const sg of dirs) {
+          const target = sg * amp, r = await stepTo(target - moved, true);
+          if (r === 'hit') { found = true; break outer; }
+          if (r === 'abort') return 'abort'; if (r === 'stall') return 'stall';
+          moved = target;
+        }
+        amp *= 2;
+      }
+    }
+    if (!found) return 'nosw';
+    // afinar el borde del microrruptor siempre desde el mismo lado
+    let r = await stepTo(-dir0 * 400, false); if (r !== 'hit' && r !== 'miss') return r;
+    const S0 = this.cfg.homeStep, V0 = this.cfg.homeSpeed; this.cfg.homeStep = 3; this.cfg.homeSpeed = 1;
+    r = await stepTo(dir0 * 400, true); this.cfg.homeStep = S0; this.cfg.homeSpeed = V0;
+    if (r !== 'hit') return 'nosw';
+    this.setAx(a, c.homeOfs[a - 1] || 0); this.homedAxes[a] = true;
+    if (report) report(a);
+    return 'ok';
+  }
+  async homeAll(order, report, abort) {
+    this.homedAxes.fill(false); this.homed = false;
+    for (const a of order) { const r = await this.homeAxis(a, report, abort); if (r !== 'ok') return r + ':' + a; }
+    this.homed = true; this.homeKind = 'HARD'; return 'ok';
+  }
+}
+
+if (typeof module !== 'undefined') module.exports = { DEF_CFG, fk, ik, axToMotors, motorsToAx, SimIO, Robot, sleep, clone };
+
+</script>
+<script>
+'use strict';
+/* ============================================================
+   INTERFAZ · pantalla de texto 80x25 estilo DOS
+   ============================================================ */
+const COLS = 80, ROWS = 25;
+const PAL = ['#000000', '#0000aa', '#00aa00', '#00aaaa', '#aa0000', '#aa00aa', '#aa5500', '#aaaaaa',
+             '#555555', '#5555ff', '#55ff55', '#55ffff', '#ff5555', '#ff55ff', '#ffff55', '#ffffff'];
+const A = { norm: 0x1F, dim: 0x17, hi: 0x70, key: 0x1B, yel: 0x1E, ok: 0x1A, err: 0x4F, warn: 0x6E, bar: 0x70,
+            inp: 0x30, grey: 0x19, red: 0x1C, cur: 0x2F };
+const CH = new Array(ROWS * COLS).fill(' '), AT = new Array(ROWS * COLS).fill(A.norm);
+const scrEl = document.getElementById('scr');
+(function makeCss() {
+  let css = '';
+  for (let a = 0; a < 256; a++) css += `.a${a}{color:${PAL[a & 15]};background:${PAL[a >> 4]}}`;
+  const st = document.createElement('style'); st.textContent = css; document.head.appendChild(st);
+})();
+function clearScr(a = A.norm) { CH.fill(' '); AT.fill(a); }
+function put(r, c, s, a = A.norm) {
+  s = String(s);
+  for (let i = 0; i < s.length; i++) { const cc = c + i; if (r < 0 || r >= ROWS || cc < 0 || cc >= COLS) continue; CH[r * COLS + cc] = s[i]; AT[r * COLS + cc] = a; }
+}
+function fillRow(r, a, c1 = 0, c2 = COLS - 1) { for (let c = c1; c <= c2; c++) { CH[r * COLS + c] = ' '; AT[r * COLS + c] = a; } }
+function center(r, s, a = A.norm) { put(r, Math.max(0, Math.floor((COLS - s.length) / 2)), s, a); }
+function box(r1, c1, r2, c2, a = A.norm, dbl = false) {
+  const h = dbl ? '═' : '─', v = dbl ? '║' : '│', k = dbl ? ['╔', '╗', '╚', '╝'] : ['┌', '┐', '└', '┘'];
+  for (let c = c1 + 1; c < c2; c++) { put(r1, c, h, a); put(r2, c, h, a); }
+  for (let r = r1 + 1; r < r2; r++) { put(r, c1, v, a); put(r, c2, v, a); }
+  put(r1, c1, k[0], a); put(r1, c2, k[1], a); put(r2, c1, k[2], a); put(r2, c2, k[3], a);
+}
+/* texto con teclas resaltadas: lo que va entre [ ] se pinta con A.key */
+function putk(r, c, s, a = A.norm, ak = A.key) {
+  let col = c, hot = false;
+  for (const ch of s) { if (ch === '[') { hot = true; continue; } if (ch === ']') { hot = false; continue; } put(r, col++, ch, hot ? ak : a); }
+}
+const esc = ch => ch === '&' ? '&amp;' : ch === '<' ? '&lt;' : ch === '>' ? '&gt;' : ch;
+let blink = true; setInterval(() => { blink = !blink; }, 500);
+function render() {
+  let html = '';
+  const cur = S.prompt ? S.prompt.cursor : null;
+  for (let r = 0; r < ROWS; r++) {
+    let run = '', ra = -1;
+    for (let c = 0; c < COLS; c++) {
+      const i = r * COLS + c; let a = AT[i];
+      if (cur && cur.r === r && cur.c === c && blink) a = ((a & 15) << 4) | ((a >> 4) & 15);
+      if (a !== ra) { if (run) html += `<span class="a${ra}">${run}</span>`; run = ''; ra = a; }
+      run += esc(CH[i]);
+    }
+    html += `<span class="a${ra}">${run}</span>\n`;
+  }
+  scrEl.innerHTML = html;
+}
+function fit() {
+  const wrap = document.getElementById('wrap'), w = wrap.clientWidth;
+  scrEl.style.fontSize = '20px';
+  const cw = scrEl.scrollWidth || 800; // ancho real a 20px
+  const k = Math.min(w / cw, 2.2);
+  scrEl.style.transform = `scale(${k})`;
+  wrap.style.height = (scrEl.offsetHeight * k + 4) + 'px';
+}
+
+/* ---------- estado y persistencia ---------- */
+const LS = 'scorbase5web.v1';
+const S = {
+  screen: 'splash', pos: {}, prog: [], names: { in: [], out: [] }, files: {},
+  cfg: clone(DEF_CFG), joint: true, disp: 'XYZ', speed: 10,
+  mode: 'SIM', robot: null, io: null, msg: '', msgAttr: A.yel, msgUntil: 0,
+  prompt: null, confirm: null, busy: false, dirty: false, lastPos: 0, progName: '',
+  counters: new Array(65).fill(0), mem: new Array(65).fill(0), run: null, runMode: 3, runLine: 0, display: true,
+  log: [], keys: {}
+};
+for (let i = 1; i <= 8; i++) { S.names.in[i] = ['OFF', 'ON']; S.names.out[i] = ['OFF', 'ON']; }
+function loadStore() {
+  try {
+    const d = JSON.parse(localStorage.getItem(LS) || 'null'); if (!d) return;
+    if (d.pos) S.pos = d.pos; if (d.prog) S.prog = d.prog; if (d.files) S.files = d.files; if (d.names) S.names = d.names;
+    if (d.cfg) { const c = clone(DEF_CFG); for (const k in d.cfg) { if (typeof c[k] === 'object' && !Array.isArray(c[k])) Object.assign(c[k], d.cfg[k]); else c[k] = d.cfg[k]; } S.cfg = c; }
+    if (d.progName) S.progName = d.progName;
+  } catch (e) { /* almacenamiento no disponible */ }
+}
+function saveStore() {
+  try { localStorage.setItem(LS, JSON.stringify({ pos: S.pos, prog: S.prog, files: S.files, names: S.names, cfg: S.cfg, progName: S.progName })); } catch (e) {}
+}
+function msg(t, a = A.yel, ms = 6000) { S.msg = t; S.msgAttr = a; S.msgUntil = Date.now() + ms; }
+
+/* ---------- línea de entrada (prompt) y confirmación ---------- */
+function promptLine(label, o = {}) {
+  return new Promise(res => {
+    S.prompt = { label, buf: o.def != null ? String(o.def) : '', r: o.r != null ? o.r : 21, c: o.c != null ? o.c : 1,
+                 max: o.max || 12, numeric: o.numeric !== false, res, cursor: null, fresh: o.def != null && String(o.def) !== '' };
+  });
+}
+function askYN(text, def = 'N') {
+  return new Promise(res => { S.confirm = { text, def, res }; });
+}
+function drawPrompt() {
+  const p = S.prompt, cf = S.confirm;
+  if (cf) { fillRow(21, A.norm); put(21, 1, cf.text + ' (Y/N)? ' + cf.def, A.yel); return; }
+  if (!p) return;
+  fillRow(p.r, A.norm, 1, 78);
+  put(p.r, p.c, p.label + ' ', A.yel);
+  const x = p.c + p.label.length + 1;
+  put(p.r, x, p.buf, A.norm);
+  p.cursor = { r: p.r, c: x + p.buf.length };
+}
+function promptKey(e) {
+  const p = S.prompt;
+  if (e.key === 'Enter') { S.prompt = null; p.res(p.buf); return; }
+  if (e.key === 'Escape' || e.key === 'PageUp') { S.prompt = null; p.res(null); return; }
+  if (e.key === 'Backspace') { p.fresh = false; p.buf = p.buf.slice(0, -1); return; }
+  if (e.key.length === 1 && p.buf.length < p.max) {
+    if (p.numeric && !/[0-9.\-+]/.test(e.key)) return;
+    if (p.fresh) { p.buf = ''; p.fresh = false; }
+    p.buf += p.numeric ? e.key : (p.upper === false ? e.key : e.key.toUpperCase());
+  }
+}
+function confirmKey(e) {
+  const cf = S.confirm; if (!e.key) return;
+  S.confirm = null; cf.res(e.key.toLowerCase() === 'y');
+}
+async function askInt(label, o = {}) {       // número entero con rango; null si cancela
+  const v = await promptLine(label, o); if (v === null) return null;
+  if (v === '' && o.def == null) return o.empty != null ? o.empty : null;
+  const n = parseFloat(v === '' ? o.def : v); if (!isFinite(n)) { msg('INVALID VALUE', A.err); return null; }
+  if (o.min != null && n < o.min || o.max != null && n > o.max) { msg('VALUE OUT OF RANGE', A.err); return null; }
+  return o.int === false ? n : Math.round(n);
+}
+
+/* ---------- robot / conexión ---------- */
+function newRobot(io) { S.io = io; S.robot = new Robot(io, S.cfg); }
+async function useSim() {
+  if (S.io && !S.io.isSim) await S.io.close();
+  else if (S.io && S.io.isSim) S.io.close();
+  const io = new SimIO(S.cfg.maxPps); newRobot(io); S.mode = 'SIM';
+  await S.robot.init(); setBadge();
+  msg('SIMULATION MODE: NO CONTROLLER CONNECTED (OFF-LINE)', A.ok);
+}
+async function connectSerial() {
+  try {
+    const io = new SerialIO(); await io.open();
+    if (S.io) { if (S.io.isSim) S.io.close(); else await S.io.close(); }
+    newRobot(io); S.mode = 'ONLINE'; await S.robot.init(); setBadge();
+    msg('CONNECTED. COUNTERS ASSUMED ZERO - RUN HOME BEFORE USING THE ROBOT', A.warn, 12000);
+  } catch (e) { msg('SERIAL: ' + (e.message || e), A.err, 10000); }
+}
+async function disconnectSerial() { if (S.mode === 'ONLINE') await useSim(); }
+function setBadge() {
+  const b = document.getElementById('badge'); if (!b) return;
+  b.textContent = S.mode === 'ONLINE' ? 'ONLINE · 9600 8N2' : 'SIMULACIÓN';
+  b.className = S.mode === 'ONLINE' ? 'on' : '';
+}
+
+/* ---------- comprobaciones de seguridad ---------- */
+function checkAx(ax) {      // ax: 7 valores objetivo; devuelve texto de error o null
+  const rb = S.robot, c = S.cfg;
+  if (!rb.homed) return null;
+  const a1 = ax[0] / c.ppd.b; if (Math.abs(a1) > 155) return 'BASE OUT OF TRAVEL (310 DEG)';
+  const f = fk(ax, c);
+  if (f.a2 > 135 || f.a2 < -40) return 'SHOULDER OUT OF TRAVEL';
+  if (c.floor.on) {
+    const lim = c.floor.z + c.floor.margin;
+    if (f.z < lim || f.wristZ < lim || f.elbowZ < lim) return 'FLOOR GUARD: ARM WOULD GO BELOW THE WORK SURFACE';
+  }
+  return null;
+}
+function guardNote() { return S.robot.homed ? '' : ' (LIMITS OFF: NOT HOMED)'; }
+const ABORT = () => S.abortReq;
+async function exclusive(fn) {         // una sola operación de robot a la vez
+  if (S.busy) { msg('ROBOT BUSY - PRESS B FOR BRAKE', A.warn); return; }
+  S.busy = true; S.abortReq = false;
+  try { return await fn(); }
+  catch (e) { msg('ERROR: ' + (e.message || e), A.err, 9000); }
+  finally { S.busy = false; }
+}
+function motionResult(r) {
+  if (r.ok) return true;
+  if (r.err) msg('MOTOR ' + r.err + ' ERROR!', A.err, 9000);
+  else if (r.braked) msg('BRAKE APPLIED - PRESS C TO CONTINUE', A.warn, 9000);
+  else if (r.timeout) msg('MOVEMENT TIMEOUT - BRAKE APPLIED', A.err, 9000);
+  return false;
+}
+async function gotoPos(p, speed) {
+  const ax = S.pos[p]; if (!ax) { msg('POSITION IS EMPTY', A.err); return false; }
+  const e = checkAx(ax); if (e) { msg(e, A.err, 9000); return false; }
+  const r = await S.robot.gotoAx(ax, speed, ABORT);
+  return motionResult(r);
+}
+
+/* ---------- coordenadas ---------- */
+function curAx() { return S.robot.ax(); }
+function fmtN(v, w, d = 0) { return (d ? v.toFixed(d) : String(Math.round(v))).padStart(w); }
+function drawCoords(r) {
+  put(r, 1, 'DISPLAY : ', A.norm);
+  ['XYZ', 'ROBOT', 'PERIPHERAL', 'OFF'].forEach((m, i) => put(r, 11 + i * 11, ' ' + m + ' ', S.disp === (m === 'PERIPHERAL' ? 'PERIPH' : m) ? A.hi : A.norm));
+  const ax = curAx();
+  if (S.disp === 'XYZ') {
+    const f = fk(ax, S.cfg);
+    put(r + 2, 4, '      X          Y          Z        PITCH       ROLL', A.yel);
+    put(r + 3, 4, fmtN(f.x, 7, 1) + '    ' + fmtN(f.y, 7, 1) + '    ' + fmtN(f.z, 7, 1) + '    ' + fmtN(f.pitch, 7, 1) + '    ' + fmtN(f.roll, 7, 1), A.norm);
+  } else if (S.disp === 'ROBOT') {
+    put(r + 2, 4, '   AX-1     AX-2     AX-3     AX-4     AX-5', A.yel);
+    put(r + 3, 4, [0, 1, 2, 3, 4].map(i => fmtN(ax[i], 8)).join('   '), A.norm);
+  } else if (S.disp === 'PERIPH') {
+    put(r + 2, 4, '   AX-6     AX-7   GRIPPER', A.yel);
+    put(r + 3, 4, fmtN(ax[5], 8) + '   ' + fmtN(ax[6], 8) + '   ' + fmtN(S.robot.tgt[8], 8), A.norm);
+  }
+}
+
+/* ---------- barra superior e inferior ---------- */
+function drawBars(title) {
+  fillRow(0, A.bar);
+  put(0, 1, 'SCORBASE LEVEL 5  ROBOTICS SOFTWARE FOR ER-III  web replica', A.bar);
+  const m = S.mode === 'ONLINE' ? 'ON-LINE' : 'OFF-LINE (SIM)';
+  put(0, COLS - m.length - 1, m, S.mode === 'ONLINE' ? 0x72 : 0x74);
+  if (title) put(2, 2, title, A.yel);
+  const now = Date.now();
+  if (S.msg && now < S.msgUntil) { fillRow(23, A.norm); put(23, 1, S.msg.slice(0, 78), S.msgAttr); }
+  else if (!S.robot.homed && S.screen !== 'splash' && S.screen !== 'home') { fillRow(23, A.norm); put(23, 1, "ROBOT HAS NOT BEEN HOMED. PLEASE SELECT 'HOME' MENU.", A.warn); }
+  fillRow(24, A.bar);
+  const rb = S.robot;
+  const home = rb.homed ? ('HOMED:' + rb.homeKind) : 'NOT HOMED';
+  put(24, 1, `SPEED ${S.speed >= 10 ? '10' : S.speed}  ${S.joint ? 'JOINT' : 'XYZ'}  ${home}  OUT ${[1, 2, 3, 4, 5, 6, 7, 8].map(i => rb.outs[i] ? i : '.').join('')}`, A.bar);
+  const pg = S.dirty ? 'CHANGES NOT SAVED' : 'SAVED'; put(24, COLS - pg.length - 1, pg, A.bar);
+}
+
+</script>
+<script>
+'use strict';
+/* ============================================================
+   PANTALLAS (parte 1): splash, main, teach, listados, edit, handling
+   ============================================================ */
+const SCREENS = {};
+function go(n) { S.screen = n; const s = SCREENS[n]; if (s.enter) s.enter(); }
+const KEYAX = { '1': [1, 1], q: [1, -1], '2': [2, 1], w: [2, -1], '3': [3, 1], e: [3, -1], '4': [4, 1], r: [4, -1],
+                '5': [5, 1], t: [5, -1], '6': [6, 1], y: [6, -1], '7': [7, 1], u: [7, -1] };
+const MSGS = ['', 'BASE IS AT HOME', 'SHOULDER IS AT HOME', 'ELBOW IS AT HOME', 'WRIST PITCH IS AT HOME', 'WRIST ROLL IS AT HOME',
+  'AXIS 6 IS AT HOME', 'AXIS 7 IS AT HOME', 'GRIPPER IS AT HOME', 'ROBOT STARTS PROGRAM', 'ROBOT FINISHES PROGRAM',
+  'BASE IS NOT AT HOME', 'SHOULDER IS NOT AT HOME', 'ELBOW IS NOT AT HOME', 'WRIST PITCH IS NOT AT HOME', 'WRIST ROLL IS NOT AT HOME',
+  'AXIS 6 IS NOT AT HOME', 'AXIS 7 IS NOT AT HOME', 'GRIPPER IS NOT AT HOME', 'ROBOT IS RESTING'];
+function nextFree() { for (let i = 1; i <= 100; i++) if (!S.pos[i]) return i; return 100; }
+function posText(ax, xyz) {
+  if (xyz) { const f = fk(ax, S.cfg); return [f.x, f.y, f.z, f.pitch, f.roll].map(v => v.toFixed(2).padStart(9)).join(' ') + ' ' + fmtN(ax[5], 6) + fmtN(ax[6], 6); }
+  return ax.map(v => String(Math.round(v)).padStart(7)).join(' ');
+}
+
+/* ---------- SPLASH ---------- */
+SCREENS.splash = {
+  draw() {
+    clearScr(A.norm); drawBars('');
+    center(6, 'SCORBASE LEVEL 5 IS LOADED', A.yel);
+    center(8, 'Web replica for SCORBOT-ER III (Eshed Robotec)', A.norm);
+    center(9, 'Not affiliated with the original software or its owners', A.grey);
+    if (S.mode === 'SIM') center(12, 'CONTROLLER NOT CONNECTED - OFF-LINE SIMULATION MODE', A.warn);
+    else center(12, 'CONTROLLER CONNECTED ON-LINE', A.ok);
+    center(14, 'Use the toolbar above to connect the serial port (Chrome / Edge).', A.norm);
+    center(16, 'Press any key to continue', A.key);
+  },
+  key() { go('main'); }
+};
+
+/* ---------- MAIN ---------- */
+SCREENS.main = {
+  draw() {
+    clearScr(A.norm); drawBars('');
+    box(4, 14, 18, 65, A.norm, true);
+    const it = [['TEACH POSITIONS (F1)', 'EDIT PROGRAM (F2)'], ['PROGRAM HANDLING (F3)', 'RUN PROGRAM (F4)'],
+                ['HOME (F5)', 'RUN CELL CONTROL (F6)'], ['I/O SETUP (F7)', 'SETUP / COMM (F8)']];
+    it.forEach((r, i) => { putk(7 + i * 2, 17, '[' + r[0].slice(0, 1) + ']' + r[0].slice(1)); putk(7 + i * 2, 41, '[' + r[1].slice(0, 1) + ']' + r[1].slice(1)); });
+    put(15, 17, 'EXIT TO DOS (Shift+F9)', A.norm);
+    center(20, 'Press the function key or the first letter of the option', A.grey);
+  },
+  async key(e) {
+    const k = e.key.toLowerCase(), t = { f1: 'teach', t: 'teach', f2: 'edit', e: 'edit', f3: 'handling', p: 'handling', f4: 'run', r: 'run',
+      f5: 'home', h: 'home', f6: 'cell', c: 'cell', f7: 'iosetup', i: 'iosetup', f8: 'setup', s: 'setup' }[k];
+    if (t) { go(t); return; }
+    if (k === 'f9' && e.shiftKey) {
+      if (await askYN(S.dirty ? 'WARNING !! CHANGES NOT SAVED  -  ARE YOU SURE' : 'ARE YOU SURE')) { await disconnectSerial(); go('dos'); }
+    }
+  }
+};
+SCREENS.dos = {
+  draw() { clearScr(0x07); put(1, 0, 'Serial port released.', 0x07); put(3, 0, 'C:\\SCORBASE>_', 0x07); put(5, 0, 'Press any key to load SCORBASE again.', 0x08); },
+  key() { go('splash'); }
+};
+
+/* ---------- TEACH POSITIONS ---------- */
+const T = { side: 0, buf: '', timer: null, moving: null, iv: null, tb: false };
+const CMDS = ['F', 'S', 'X', 'J', 'L', 'OG', 'CG', 'ON', 'OFF', 'CN', 'CF', 'CC', 'RP', 'RR', 'RB', 'RH', 'TP', 'TR', 'GP', 'GH', 'GL', 'GC', 'SC', 'ST'];
+SCREENS.teach = {
+  draw() {
+    clearScr(A.norm); drawBars('TEACH POSITIONS MENU');
+    box(3, 1, 15, 38, T.side === 0 ? A.yel : A.dim); box(3, 40, 15, 78, T.side === 1 ? A.yel : A.dim);
+    const L = S.joint
+      ? ['[1]/[Q] move base right / left', '[2]/[W] move shoulder up / down', '[3]/[E] move elbow up / down', '[4]/[R] move wrist-pitch up/dn',
+         '[5]/[T] move wrist-roll right/left', '[6]/[Y] move axis 6 + / -', '[7]/[U] move axis 7 + / -']
+      : ['[1]/[Q] move X + / -', '[2]/[W] move Y + / -', '[3]/[E] move Z up / down', '[4]/[R] pitch up / down',
+         '[5]/[T] roll right / left', '[6]/[Y] move axis 6 + / -', '[7]/[U] move axis 7 + / -'];
+    L.push('[OG]/[CG] Open / Close Gripper', '[F]/[S] Fast / Speed 1-10 movement', '[ON]/[OFF] turn Output # on / off',
+           '[X]/[J] cartesian / joint  <SPACE>');
+    L.forEach((s, i) => putk(4 + i, 3, s, A.norm));
+    const R = ['[CC] Change Coordinate display', '[RP] Record Position...', '[RR] Record Relative position...', '[TP] Teach Position... (xyz)',
+               '[TR] Teach Relative position... (xyz)', '[RB]/[RH] Record roBot/periHeral pos.', '[GP] Go to Position...', '[GH] Go Home',
+               '[L ] List / delete positions'];
+    R.forEach((s, i) => putk(4 + i, 42, s, A.norm));
+    drawCoords(17);
+    put(22, 1, 'CMD: ' + T.buf, A.grey);
+    drawPrompt();
+  },
+  key(e) {
+    const k = e.key.toLowerCase();
+    if (e.key === 'Escape' || e.key === 'PageUp') { if (T.buf) { T.buf = ''; clearTimeout(T.timer); } else go('main'); return; }
+    if (e.key === 'ArrowLeft') { T.side = 0; return; } if (e.key === 'ArrowRight') { T.side = 1; return; }
+    if (e.key === ' ') { T.side ^= 1; return; }
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    if (/^[1-7]$/.test(e.key)) { startMove(k); return; }
+    if (/^[a-z]$/.test(k)) teachLetter(k.toUpperCase());
+  },
+  keyup(e) { const k = e.key.toLowerCase(); if (T.moving && T.moving.k === k) stopMove(); }
+};
+function teachLetter(ch) {
+  clearTimeout(T.timer);
+  let b = T.buf + ch;
+  if (!CMDS.some(c => c.startsWith(b))) {
+    b = ch;
+    if (!CMDS.some(c => c.startsWith(b))) { T.buf = ''; if (KEYAX[ch.toLowerCase()]) startMove(ch.toLowerCase()); else msg('UNKNOWN COMMAND', A.err, 2500); return; }
+  }
+  T.buf = b;
+  if (CMDS.includes(b) && !CMDS.some(c => c.length > b.length && c.startsWith(b))) { T.buf = ''; runCmd(b); return; }
+  T.timer = setTimeout(resolveBuf, 260);
+}
+function resolveBuf() {
+  const b = T.buf; T.buf = '';
+  if (CMDS.includes(b)) { runCmd(b); return; }
+  if (b.length === 1 && KEYAX[b.toLowerCase()]) { const k = b.toLowerCase(); if (S.keys[k]) startMove(k); else tapMove(k); }
+}
+async function moveStep(a, sg) {
+  const c = S.cfg, rb = S.robot;
+  if (S.joint || a > 5) {
+    const d = sg * c.key['a' + a] * c.step, ax = rb.ax(); ax[a - 1] += d;
+    const e = checkAx(ax); if (e) { msg(e, A.err, 5000); throw new Error(e); }
+    await rb.nudge(a, d, S.speed);
+  } else {
+    const ax = rb.ax(), p = fk(ax, c), mm = Math.max(0.5, c.step / 12), t = { x: p.x, y: p.y, z: p.z, pitch: p.pitch, roll: p.roll };
+    if (a === 1) t.x += sg * mm; else if (a === 2) t.y += sg * mm; else if (a === 3) t.z += sg * mm; else if (a === 4) t.pitch += sg * mm / 2; else t.roll += sg * mm / 2;
+    const n = ik(t.x, t.y, t.z, t.pitch, t.roll, c, ax); if (!n) { msg('OUT OF REACH', A.err, 3000); throw new Error('OUT OF REACH'); }
+    const full = n.concat([ax[5], ax[6]]), e = checkAx(full); if (e) { msg(e, A.err, 5000); throw new Error(e); }
+    const m = axToMotors(full);
+    for (let i = 1; i <= 7; i++) { const d = Math.round(m[i] - rb.tgt[i]); if (d) { await rb.setSpeed(i, S.speed); await rb.mcmd(i, d); } }
+  }
+}
+function startMove(k) {
+  if (T.moving || !KEYAX[k]) return;
+  if (S.busy) { msg('ROBOT BUSY - PRESS B FOR BRAKE', A.warn, 3000); return; }
+  const [a, sg] = KEYAX[k]; T.moving = { k, a, sg }; S.busy = true; S.abortReq = false;
+  tickMove(); T.iv = setInterval(tickMove, S.cfg.period);
+}
+async function tickMove() {
+  if (!T.moving || T.tb) return; T.tb = true;
+  try { await moveStep(T.moving.a, T.moving.sg); } catch (e) { stopMove(); } finally { T.tb = false; }
+}
+async function stopMove() {
+  if (!T.moving) return; clearInterval(T.iv); T.moving = null;
+  try { while (T.tb) await sleep(10); motionResult(await S.robot.waitDone()); } catch (e) { msg('ERROR: ' + e.message, A.err); }
+  S.busy = false;
+}
+function tapMove(k) { exclusive(async () => { const [a, sg] = KEYAX[k]; try { await moveStep(a, sg); } catch (e) { return; } motionResult(await S.robot.waitDone()); }); }
+
+async function askPos(label, def) { return askInt(label, { min: 1, max: 100, def: def != null ? def : nextFree() }); }
+async function runCmd(c) {
+  const rb = S.robot, cfg = S.cfg;
+  switch (c) {
+    case 'F': S.speed = 10; msg('SPEED 10 (FASTEST)', A.ok); break;
+    case 'S': { const v = await askInt('SPEED (1 SLOWEST - 10 FASTEST) ...', { min: 1, max: 10, def: S.speed, int: false }); if (v != null) S.speed = v; break; }
+    case 'X': S.joint = false; break;
+    case 'J': S.joint = true; break;
+    case 'L': go('list'); SCREENS.list.open('pos'); break;
+    case 'OG': exclusive(async () => motionResult(await rb.gripper(true, ABORT))); break;
+    case 'CG': exclusive(async () => motionResult(await rb.gripper(false, ABORT))); break;
+    case 'ON': case 'OFF': {
+      const n = await askInt('TURN ' + c + ' OUTPUT # ...', { min: 1, max: 8, numeric: true }); if (n == null) break;
+      await exclusive(async () => { await rb.output(n, c === 'ON'); }); break;
+    }
+    case 'CC': { const v = await askInt('DISPLAY: 1=XYZ 2=ROBOT 3=PERIPHERAL 4=OFF', { min: 1, max: 4 }); if (v) S.disp = ['XYZ', 'ROBOT', 'PERIPH', 'OFF'][v - 1]; break; }
+    case 'RP': case 'RB': case 'RH': {
+      const n = await askPos('RECORD POSITION (1-100) ...'); if (n == null) break;
+      const cur = curAx(), old = S.pos[n] || [0, 0, 0, 0, 0, 0, 0];
+      S.pos[n] = c === 'RP' ? cur.slice() : c === 'RB' ? cur.slice(0, 5).concat(old.slice(5)) : old.slice(0, 5).concat(cur.slice(5));
+      S.pos[n] = S.pos[n].map(Math.round); S.lastPos = n; S.dirty = true; msg('POSITION ' + n + ' RECORDED', A.ok); break;
+    }
+    case 'RR': {
+      const n = await askPos('RECORD POSITION (1-100) ...'); if (n == null) break;
+      const r = await promptLine('RELATIVE TO ... (Enter = CURRENT)'); if (r === null) break;
+      let base = curAx();
+      if (r !== '') { const ref = S.pos[parseInt(r, 10)]; if (!ref) { msg('POSITION IS EMPTY', A.err); break; } base = ref.slice(); }
+      const out = [];
+      for (let i = 0; i < 7; i++) { const v = await askInt('AXIS ' + (i + 1) + ' = 0 .....', { def: 0, int: true, r: 21 }); if (v === null) return; out.push(base[i] + v); }
+      S.pos[n] = out.map(Math.round); S.dirty = true; msg('POSITION ' + n + ' RECORDED (STORED AS ABSOLUTE)', A.ok); break;
+    }
+    case 'TP': case 'TR': {
+      const rel = c === 'TR', p = fk(curAx(), cfg), lab = ['X(MM) =', 'Y(MM) =', 'Z(MM) =', 'PITCH (DEG)=', 'ROLL (DEG) ='];
+      const def = rel ? [0, 0, 0, 0, 0] : [p.x, p.y, p.z, p.pitch, p.roll].map(v => +v.toFixed(2)), v = [];
+      for (let i = 0; i < 5; i++) { const x = await askInt(lab[i], { def: def[i], int: false, max: 5000, min: -5000 }); if (x === null) return; v.push(x); }
+      const n = await askPos('RECORD POSITION (1-100) ...'); if (n == null) break;
+      let t;
+      if (rel) {
+        const r = await promptLine('RELATIVE TO ... (Enter = CURRENT)'); if (r === null) break;
+        let ref = curAx(); if (r !== '') { const q = S.pos[parseInt(r, 10)]; if (!q) { msg('POSITION IS EMPTY', A.err); break; } ref = q; }
+        const q = fk(ref, cfg); t = [q.x + v[0], q.y + v[1], q.z + v[2], q.pitch + v[3], q.roll + v[4]];
+      } else t = v;
+      const ax = ik(t[0], t[1], t[2], t[3], t[4], cfg, curAx()); if (!ax) { msg('POSITION OUT OF REACH', A.err); break; }
+      S.pos[n] = ax.concat([curAx()[5], curAx()[6]]).map(Math.round); S.dirty = true; msg('POSITION ' + n + ' RECORDED', A.ok); break;
+    }
+    case 'GP': {
+      const n = await askPos('GO POSITION ...', S.lastPos || 1); if (n == null) break;
+      await exclusive(async () => { S.lastPos = n; await gotoPos(n, S.speed); }); break;
+    }
+    case 'GH': await exclusive(async () => { const z = [0, 0, 0, 0, 0, 0, 0], e = checkAx(z); if (e) { msg(e, A.err); return; } motionResult(await rb.gotoAx(z, S.speed, ABORT)); }); break;
+    default: msg('NOT AVAILABLE ON THE ER-III CONTROLLER', A.warn);
+  }
+}
+
+/* ---------- LISTADO / BORRADO (posiciones y programa) ---------- */
+const LST = { kind: 'pos', lines: [], top: 0, xyz: false };
+function lineText(i) { return String(i + 1).padStart(3) + '  ' + fmtIns(S.prog[i]); }
+function listBuild(kind, from, to) {
+  const out = [];
+  if (kind === 'pos') {
+    out.push(LST.xyz ? '  #        X         Y         Z     PITCH      ROLL  AX-6  AX-7' : '  #   AX-1    AX-2    AX-3    AX-4    AX-5    AX-6    AX-7');
+    for (let i = from; i <= to; i++) if (S.pos[i]) out.push(String(i).padStart(3) + ' ' + posText(S.pos[i], LST.xyz));
+  } else for (let i = from - 1; i < Math.min(to, S.prog.length); i++) out.push(lineText(i));
+  if (out.length <= (kind === 'pos' ? 1 : 0)) out.push(kind === 'pos' ? 'NO POSITIONS' : 'NO PROGRAM LINES');
+  return out;
+}
+SCREENS.list = {
+  open(kind) { LST.kind = kind; LST.lines = []; LST.top = 0; LST.back = kind === 'pos' ? 'teach' : 'edit'; },
+  draw() {
+    clearScr(A.norm); const pos = LST.kind === 'pos';
+    drawBars(pos ? 'LIST / DELETE POSITIONS SCREEN' : 'LIST / DELETE PROGRAM SCREEN');
+    const m = pos ? ['[1] LIST POSITION ...', '[2] LIST FROM POSITION ...', '[3] DELETE POSITION ...', '[4] DELETE FROM POSITION ... TO POSITION ...', '[5] DELETE ALL', '[6] PRINT POSITION (TO FILE)']
+                  : ['[1] LIST LINE ...', '[2] LIST FROM LINE ...', '[3] DELETE LINE ...', '[4] DELETE FROM LINE ... TO LINE ...', '[5] DELETE ALL', '[6] PRINT PROGRAM (TO FILE)'];
+    m.forEach((s, i) => putk(4 + i, 3, s)); if (pos) putk(10, 3, '[R]/[X] ROBOT / XYZ COORDINATES  (now: ' + (LST.xyz ? 'XYZ' : 'ROBOT') + ')');
+    put(11, 1, '─'.repeat(78), A.dim);
+    LST.lines.slice(LST.top, LST.top + 9).forEach((s, i) => put(12 + i, 2, s.slice(0, 76), A.norm));
+    if (LST.lines.length > 9) put(21, 50, 'PgUp/PgDn/arrows scroll', A.grey);
+    put(22, 1, '<ESC> RETURN', A.grey); drawPrompt();
+  },
+  async key(e) {
+    const k = e.key.toLowerCase(), pos = LST.kind === 'pos', max = pos ? 100 : Math.max(1, S.prog.length);
+    if (e.key === 'Escape') { go(LST.back); return; }
+    if (e.key === 'ArrowDown') { LST.top = Math.min(Math.max(0, LST.lines.length - 9), LST.top + 1); return; }
+    if (e.key === 'ArrowUp') { LST.top = Math.max(0, LST.top - 1); return; }
+    if (e.key === 'PageDown') { LST.top = Math.min(Math.max(0, LST.lines.length - 9), LST.top + 9); return; }
+    if (e.key === 'PageUp') { LST.top = Math.max(0, LST.top - 9); return; }
+    if (pos && (k === 'r' || k === 'x')) { LST.xyz = k === 'x'; return; }
+    if (k === '1') { const n = await askInt((pos ? 'POSITION' : 'LINE') + ' ...', { min: 1, max }); if (n != null) { LST.lines = listBuild(LST.kind, n, n); LST.top = 0; } }
+    else if (k === '2') { const n = await askInt('FROM ' + (pos ? 'POSITION' : 'LINE') + ' ...', { min: 1, max, def: 1 }); if (n != null) { LST.lines = listBuild(LST.kind, n, pos ? 100 : S.prog.length); LST.top = 0; } }
+    else if (k === '3') {
+      const n = await askInt('DELETE ' + (pos ? 'POSITION' : 'LINE') + ' ...', { min: 1, max }); if (n == null) return;
+      if (pos ? !S.pos[n] : n > S.prog.length) { msg(pos ? 'POSITION IS EMPTY' : 'NO SUCH LINE', A.err); return; }
+      if (await askYN('ARE YOU SURE')) { delRange(pos, n, n); LST.lines = []; }
+    } else if (k === '4') {
+      const a = await askInt('FROM ...', { min: 1, max }); if (a == null) return; const b = await askInt('TO ...', { min: a, max, def: a }); if (b == null) return;
+      if (await askYN('ARE YOU SURE')) { delRange(pos, a, b); LST.lines = []; }
+    } else if (k === '5') { if (await askYN('DELETE ALL - ARE YOU SURE')) { if (pos) S.pos = {}; else S.prog = []; S.dirty = true; LST.lines = []; msg('DELETED', A.ok); } }
+    else if (k === '6') { const t = listBuild(LST.kind, 1, pos ? 100 : S.prog.length).join('\r\n'); download((pos ? 'POSITIONS' : 'PROGRAM') + '.TXT', t, 'text/plain'); }
+  }
+};
+function delRange(pos, a, b) {
+  if (pos) { for (let i = a; i <= b; i++) delete S.pos[i]; }
+  else { const cnt = Math.min(b, S.prog.length) - a + 1; if (cnt <= 0) return; S.prog.splice(a - 1, cnt); retarget(l => l > b ? l - cnt : l >= a ? a : l); }
+  S.dirty = true; msg('DELETED', A.ok);
+}
+function download(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type: type || 'application/octet-stream' }));
+  const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 500);
+}
+
+/* ---------- PROGRAMA: formato, saltos, edición ---------- */
+function fmtIns(i) {
+  if (!i) return '';
+  switch (i.t) {
+    case 'GO': return 'GO POSITION ' + i.p + ' ' + (i.f ? '*FAST' : 'SPEED #' + i.s);
+    case 'WAIT': return 'WAIT ' + i.s + ' SECONDS';
+    case 'IFIN': return 'IF INPUT #' + i.n + ' ON JUMP TO ' + i.line;
+    case 'ON': return 'TURN ON OUTPUT #' + i.n;
+    case 'OFF': return 'TURN OFF OUTPUT #' + i.n;
+    case 'JUMP': return 'JUMP TO LINE # ' + i.line;
+    case 'OPEN': return 'OPEN GRIPPER';
+    case 'CLOSE': return 'CLOSE GRIPPER';
+    case 'SETC': return 'SET COUNTER #' + i.n + ' TO ' + i.v;
+    case 'DECC': return 'DECREMENT COUNTER #' + i.n;
+    case 'IFC': return 'IF COUNTER #' + i.n + ' > 0 JUMP TO ' + i.line;
+    case 'SUB': return 'SET SUBROUTINE #' + i.n;
+    case 'RET': return 'RETURN FROM SUBROUTINE';
+    case 'CALL': return 'CALL SUBROUTINE #' + i.n;
+    case 'SETM': return 'SET MEMORY #' + i.n + ' TO ' + i.v;
+    case 'SENS': return 'SET MEMORY #' + i.n + ' TO SENSOR';
+    case 'IFM': return 'IF MEMORY #' + i.a + ' ' + i.op + ' MEMORY #' + i.b + ' JUMP ' + i.line;
+    case 'REM': return 'REMARK: ' + i.txt;
+    case 'PRINT': return 'PRINT ' + i.txt;
+    case 'ERR': return 'ON MOTOR ' + (i.n ? i.n : 'ALL') + ' ERROR JUMP TO ' + (i.line || 'NEXT') + ' ' + i.mode;
+    case 'ZERO': return 'SET AXIS #' + i.n + ' TO ZERO';
+    case 'HOMESET': return 'SET PRESENT POSITION AS HOME';
+    case 'IFL': return 'IF LIMIT SWITCH #' + i.n + ' ON JUMP TO ' + i.line;
+    case 'MSG': return 'MESSAGE #' + i.n + ' ' + (MSGS[i.n] || '');
+  }
+  return '?';
+}
+function retarget(fn) { for (const i of S.prog) if (i && typeof i.line === 'number' && i.line > 0) i.line = fn(i.line); }
+const ED = { mode: 'append', at: 0, cur: 0 };
+function edCommit(ins) {
+  if (ED.mode === 'append') { S.prog.push(ins); ED.cur = S.prog.length - 1; }
+  else if (ED.mode === 'insert') { retarget(l => l >= ED.at + 1 ? l + 1 : l); S.prog.splice(ED.at, 0, ins); ED.cur = ED.at; ED.at++; }
+  else { S.prog[ED.at] = ins; ED.cur = ED.at; ED.mode = 'append'; }
+  S.dirty = true;
+}
+async function buildIns(k, ctrl) {
+  const num = (l, o) => askInt(l, Object.assign({ min: 1 }, o || {}));
+  if (ctrl) {
+    if (k === 'o') { const n = await num('SET AXIS #... TO ZERO', { max: 7 }); return n && { t: 'ZERO', n }; }
+    if (k === 'j') return { t: 'HOMESET' };
+    if (k === 'l') { const n = await num('LIMIT SWITCH # (1-7) ...', { max: 7 }); if (!n) return null; const l = await num('JUMP TO ...', { max: 10000 }); return l && { t: 'IFL', n, line: l }; }
+    if (k === 'k') { const n = await num('MESSAGE # (1-19) ...', { max: 19 }); return n && { t: 'MSG', n }; }
+    return null;
+  }
+  switch (k) {
+    case 'o': return { t: 'OPEN' };
+    case 'c': return { t: 'CLOSE' };
+    case '1': {
+      const p = await num('GO POSITION ...', { max: 100, def: (S.lastGo || 0) + 1 }); if (!p) return null; S.lastGo = p;
+      const v = await promptLine('FAST (Enter/F) or SPEED (1-9.9) ...', { numeric: false, max: 4 }); if (v === null) return null;
+      if (v === '' || v === 'F') return { t: 'GO', p, f: true };
+      const s = parseFloat(v); if (!(s >= 1 && s <= 9.9)) { msg('VALUE OUT OF RANGE', A.err); return null; }
+      return { t: 'GO', p, f: false, s };
+    }
+    case '2': { const s = await num('WAIT ... SECONDS', { min: 0, int: false, max: 9999 }); return s != null && { t: 'WAIT', s }; }
+    case '3': { const n = await num('IF INPUT # (1-8) ...', { max: 8 }); if (!n) return null; const l = await num('JUMP TO ...', { max: 10000 }); return l && { t: 'IFIN', n, line: l }; }
+    case '4': { const n = await num('TURN ON OUTPUT # (1-8) ...', { max: 8 }); return n && { t: 'ON', n }; }
+    case 'r': { const n = await num('TURN OFF OUTPUT # (1-8) ...', { max: 8 }); return n && { t: 'OFF', n }; }
+    case '5': { const l = await num('JUMP TO LINE # ...', { max: 10000 }); return l && { t: 'JUMP', line: l }; }
+    case '6': { const n = await num('SET COUNTER # (1-64) ...', { max: 64 }); if (!n) return null; const v = await num('TO ... (1-9999)', { max: 9999 }); return v && { t: 'SETC', n, v }; }
+    case '7': { const n = await num('DECREMENT COUNTER # ...', { max: 64 }); return n && { t: 'DECC', n }; }
+    case '8': { const n = await num('IF COUNTER # ... > 0', { max: 64 }); if (!n) return null; const l = await num('JUMP TO ...', { max: 10000 }); return l && { t: 'IFC', n, line: l }; }
+    case '9': { const n = await num('SET SUBROUTINE # (1-64) ...', { max: 64 }); return n && { t: 'SUB', n }; }
+    case '0': return { t: 'RET' };
+    case 'p': { const n = await num('CALL SUBROUTINE # (1-64) ...', { max: 64 }); return n && { t: 'CALL', n }; }
+    case 'm': { const n = await num('SET MEMORY # (1-64) ...', { max: 64 }); if (!n) return null; const v = await askInt('TO ... (+-32767)', { min: -32767, max: 32767, def: 0 }); return v != null && { t: 'SETM', n, v }; }
+    case 'n': { const n = await num('SET MEMORY # (1-64) TO SENSOR', { max: 64 }); return n && { t: 'SENS', n }; }
+    case 'v': {
+      const a = await num('IF MEMORY # ...', { max: 64 }); if (!a) return null;
+      const op = await promptLine('OPERATOR (= < > <= >= <>) ...', { numeric: false, max: 2 }); if (!['=', '<', '>', '<=', '>=', '<>'].includes(op)) { if (op !== null) msg('INVALID OPERATOR', A.err); return null; }
+      const b = await num('MEMORY # ...', { max: 64 }); if (!b) return null; const l = await num('JUMP TO ...', { max: 10000 }); return l && { t: 'IFM', a, op, b, line: l };
+    }
+    case 'd': { const t = await promptLine('REMARK: ', { numeric: false, max: 48, c: 1 }); return t && { t: 'REM', txt: t }; }
+    case 'y': { const t = await promptLine('PRINT: ', { numeric: false, max: 48, c: 1 }); return t && { t: 'PRINT', txt: t }; }
+    case 'a': {
+      const n = await askInt('ON MOTOR # (1-8, Enter=ALL) ...', { min: 1, max: 8, empty: 0 }); if (n === null) return null;
+      const m = await promptLine('MODE: C=CONT S=SING O=OFF', { numeric: false, max: 1 }); if (!['C', 'S', 'O'].includes(m)) return null;
+      let l = 0; if (m !== 'O') { l = await askInt('JUMP TO ... (Enter = NEXT)', { min: 1, max: 10000, empty: 0 }); if (l === null) return null; }
+      return { t: 'ERR', n, line: l, mode: m === 'C' ? 'CONT.' : m === 'S' ? 'SING.' : 'OFF' };
+    }
+    case 's': { const n = await num('SET AXIS # ... TO ZERO', { max: 7 }); return n && { t: 'ZERO', n }; }
+  }
+  return null;
+}
+
+SCREENS.edit = {
+  draw() {
+    clearScr(A.norm); drawBars('EDIT PROGRAM MENU');
+    const n = S.prog.length; ED.cur = Math.min(ED.cur, Math.max(0, n - 1));
+    const top = Math.max(0, Math.min(ED.cur - 6, n - 12));
+    box(3, 1, 16, 78, A.dim);
+    for (let r = 0; r < 12; r++) {
+      const i = top + r; if (i > n) break;
+      if (i === n) { put(4 + r, 3, String(i + 1).padStart(4) + '  ' + (ED.mode === 'insert' ? '' : '_'), A.grey); break; }
+      put(4 + r, 3, String(i + 1).padStart(4) + '  ' + fmtIns(S.prog[i]), (ED.mode !== 'append' && i === ED.at) ? A.hi : A.norm);
+    }
+    const m = ['[O]/[C] Open/Close grip   [1] Go to position   [2] Wait   [3] If input jump',
+      '[4]/[R] Output on/off   [5] Jump   [6] Set counter   [7] Dec counter',
+      '[8] If counter>0 jump   [9]/[0]/[P] Sub set/return/call   [M] Set memory',
+      '[N] Memory=sensor   [V] If memory cmp   [D] Remark   [Y] Print   [A] Motor error',
+      '[S] Axis to zero   Ctrl+[J] Home here   Ctrl+[L] If limit   Ctrl+[K] Message',
+      '[I] Insert   [X] Replace   [L] List/delete   <Enter> end insert   <ESC> return'];
+    m.forEach((s, i) => putk(17 + i, 1, s, A.norm));
+    if (ED.mode === 'insert') put(2, 40, 'INSERT MODE at line ' + (ED.at + 1), A.warn);
+    if (ED.mode === 'replace') put(2, 40, 'REPLACE line ' + (ED.at + 1), A.warn);
+    drawPrompt();
+  },
+  async key(e) {
+    const k = e.key.toLowerCase();
+    if (e.key === 'Escape' || e.key === 'PageUp') { go('main'); return; }
+    if (e.key === 'ArrowUp') { ED.cur = Math.max(0, ED.cur - 1); return; } if (e.key === 'ArrowDown') { ED.cur = Math.min(S.prog.length - 1, ED.cur + 1); return; }
+    if (e.key === 'Enter') { ED.mode = 'append'; return; }
+    if (k === 'l' && !e.ctrlKey) { go('list'); SCREENS.list.open('prog'); return; }
+    if (k === 'i' && !e.ctrlKey) { const n = await askInt('INSERT AT LINE ...', { min: 1, max: S.prog.length + 1 }); if (n) { ED.mode = 'insert'; ED.at = n - 1; } return; }
+    if (k === 'x' && !e.ctrlKey) { const n = await askInt('REPLACE LINE ...', { min: 1, max: S.prog.length }); if (n) { ED.mode = 'replace'; ED.at = n - 1; } return; }
+    if (e.altKey || e.metaKey || e.key.length !== 1) return;
+    const ins = await buildIns(k, e.ctrlKey); if (ins) edCommit(ins);
+  }
+};
+
+/* ---------- PROGRAM HANDLING ---------- */
+SCREENS.handling = {
+  draw() {
+    clearScr(A.norm); drawBars('PROGRAM HANDLING MENU');
+    ['[1] Save Program (and positions)', '[2] Load Program', '[3] Delete Program', '[4] Catalog', '[5] Export to file (.L5)', '[6] Import from file (.L5)']
+      .forEach((s, i) => putk(5 + i * 2, 6, s));
+    put(18, 6, 'Current program: ' + (S.progName || '(none)') + '   lines: ' + S.prog.length + '   positions: ' + Object.keys(S.pos).length, A.grey);
+    put(20, 6, 'Programs are kept in this browser; use Export to keep a real file.', A.grey);
+    put(22, 1, '<ESC> RETURN TO MAIN MENU', A.grey); drawPrompt();
+    if (SCREENS.handling.cat) SCREENS.handling.cat.forEach((s, i) => put(5 + i, 46, s, A.norm));
+  },
+  async key(e) {
+    const k = e.key.toLowerCase(), H = SCREENS.handling; if (e.key === 'Escape') { H.cat = null; go('main'); return; }
+    const nm = async l => { const v = await promptLine(l, { numeric: false, max: 8, def: S.progName }); if (!v) return null; if (!/^[A-Z][A-Z0-9]{0,7}$/.test(v)) { msg('NAME: UP TO 8 CHARACTERS, START WITH A LETTER', A.err); return null; } return v; };
+    if (k === '1' || k === 's') { const n = await nm('PROGRAM NAME ...'); if (n) { S.files[n] = { prog: clone(S.prog), pos: clone(S.pos) }; S.progName = n; S.dirty = false; saveStore(); msg('PROGRAM SAVED: ' + n, A.ok); } }
+    else if (k === '2' || k === 'l') { const n = await nm('PROGRAM NAME ...'); if (n) { const f = S.files[n]; if (!f) { msg('FILE NOT FOUND', A.err); return; } S.prog = clone(f.prog); S.pos = clone(f.pos); S.progName = n; S.dirty = false; ED.cur = 0; msg('PROGRAM LOADED: ' + n, A.ok); } }
+    else if (k === '3' || k === 'd') { const n = await nm('PROGRAM NAME ...'); if (n && S.files[n] && await askYN('ARE YOU SURE')) { delete S.files[n]; saveStore(); msg('DELETED', A.ok); } else if (n && !S.files[n]) msg('FILE NOT FOUND', A.err); }
+    else if (k === '4' || k === 'c') { const names = Object.keys(S.files).sort(); H.cat = ['CATALOG:'].concat(names.length ? names.map(n => ' ' + n + '.L5   ' + S.files[n].prog.length + ' lines') : [' (empty)']); }
+    else if (k === '5') { const n = S.progName || 'PROGRAM'; download(n + '.L5', JSON.stringify({ app: 'SCORBASE5WEB', v: 1, name: n, pos: S.pos, prog: S.prog }, null, 1), 'application/json'); msg('EXPORTED ' + n + '.L5', A.ok); }
+    else if (k === '6') document.getElementById('fileIn').click();
+  }
+};
+function importFile(text, fname) {
+  try {
+    const d = JSON.parse(text); if (d.app !== 'SCORBASE5WEB' || !Array.isArray(d.prog)) throw new Error('NOT A SCORBASE5WEB FILE');
+    S.prog = d.prog; S.pos = d.pos || {}; S.progName = (d.name || fname || '').toUpperCase().replace(/\.[A-Z0-9]+$/, '').slice(0, 8); S.dirty = true; ED.cur = 0;
+    msg('IMPORTED: ' + (S.progName || fname) + ' (' + S.prog.length + ' LINES)', A.ok);
+  } catch (e) { msg('IMPORT FAILED: ' + e.message, A.err); }
+}
+
+</script>
+<script>
+'use strict';
+/* ============================================================
+   PANTALLAS (parte 2): run, cell control, home, I/O, setup + teclado
+   ============================================================ */
+const waitUntil = async (pred, ms = 50) => { while (!pred()) await sleep(ms); };
+
+/* ---------- motor de ejecución de programas ---------- */
+async function settle(r, R) {            // tras un freno B espera a C (continuar) o M (menú)
+  const rb = S.robot;
+  while (r.braked && !R.menu) {
+    await waitUntil(() => !rb.braked || R.menu);
+    if (R.menu) return { ok: false, menu: true };
+    r = await rb.waitDone(null);
+  }
+  return r;
+}
+function jumpTo(R, line) { R.next = Math.max(0, line - 1); }
+async function onMotion(r, R) {          // procesa el resultado de un movimiento dentro del programa
+  r = await settle(r, R);
+  if (r.ok || r.menu) return;
+  if (r.err) {
+    const h = R.errH[r.err] || R.errH[0];
+    if (h) { if (h.mode === 'SING.') { delete R.errH[r.err]; delete R.errH[0]; } jumpTo(R, h.line || R.line + 2); return; }
+    throw new Error('MOTOR ' + r.err + ' ERROR!');
+  }
+  if (r.timeout) throw new Error('MOVEMENT TIMEOUT');
+}
+async function runStep(ins, R) {
+  const rb = S.robot;
+  switch (ins.t) {
+    case 'GO': {
+      const ax = S.pos[ins.p]; if (!ax) throw new Error('POSITION ' + ins.p + ' IS EMPTY');
+      const e = checkAx(ax); if (e) throw new Error(e);
+      await onMotion(await rb.gotoAx(ax, ins.f ? 10 : ins.s, null), R); break;
+    }
+    case 'WAIT': { const end = Date.now() + ins.s * 1000; while (Date.now() < end && !R.stop && !R.menu) await sleep(50); break; }
+    case 'IFIN': if (await rb.input(ins.n)) jumpTo(R, ins.line); break;
+    case 'ON': await rb.output(ins.n, true); break;
+    case 'OFF': await rb.output(ins.n, false); break;
+    case 'JUMP': jumpTo(R, ins.line); break;
+    case 'OPEN': await onMotion(await rb.gripper(true, null), R); break;
+    case 'CLOSE': await onMotion(await rb.gripper(false, null), R); break;
+    case 'SETC': S.counters[ins.n] = ins.v; break;
+    case 'DECC': S.counters[ins.n]--; break;
+    case 'IFC': if (S.counters[ins.n] > 0) jumpTo(R, ins.line); break;
+    case 'SUB': { let j = R.line + 1; while (j < S.prog.length && S.prog[j].t !== 'RET') j++; R.next = j + 1; break; }
+    case 'RET': { if (!R.stack.length) throw new Error('RETURN WITHOUT CALL'); R.next = R.stack.pop(); break; }
+    case 'CALL': { const i = R.subs[ins.n]; if (i == null) throw new Error('SUBROUTINE ' + ins.n + ' NOT DEFINED'); R.stack.push(R.line + 1); R.next = i + 1; break; }
+    case 'SETM': S.mem[ins.n] = ins.v; break;
+    case 'SENS': { const mm = Math.round(Math.abs(rb.cnt[8]) / 20); S.mem[ins.n] = mm; R.log.push('SENSOR VALUE IS ' + mm); break; }
+    case 'IFM': {
+      const a = S.mem[ins.a], b = S.mem[ins.b];
+      const ok = { '=': a === b, '<': a < b, '>': a > b, '<=': a <= b, '>=': a >= b, '<>': a !== b }[ins.op]; if (ok) jumpTo(R, ins.line); break;
+    }
+    case 'REM': break;
+    case 'PRINT': R.log.push(ins.txt); break;
+    case 'ERR': if (ins.mode === 'OFF') { delete R.errH[ins.n || 0]; } else R.errH[ins.n || 0] = ins; break;
+    case 'ZERO': rb.setAx(ins.n, 0); break;
+    case 'HOMESET': rb.setHomeHere(); break;
+    case 'IFL': if (await rb.limit(ins.n)) jumpTo(R, ins.line); break;
+    case 'MSG': R.log.push(MSGS[ins.n]); break;
+  }
+}
+async function startRun() {
+  if (S.run && S.run.active) return;
+  if (!S.prog.length) { msg('NO PROGRAM IN MEMORY', A.err); return; }
+  if (S.busy) { msg('ROBOT BUSY', A.warn); return; }
+  const R = S.run = { mode: S.runMode, line: Math.min(S.runLine, S.prog.length - 1), active: true, stop: false, braked: false, menu: false, log: [], stack: [], errH: {}, subs: {} };
+  S.prog.forEach((p, i) => { if (p.t === 'SUB') R.subs[p.n] = i; });
+  R.cur = R.line; S.busy = true; S.abortReq = false; S.robot.braked = false;
+  try {
+    if (R.mode !== 1) R.log.push('ROBOT STARTS PROGRAM');
+    while (!R.stop && !R.menu) {
+      if (R.line >= S.prog.length) { if (R.mode === 3) { R.line = 0; continue; } break; }
+      R.cur = R.line; R.next = R.line + 1;
+      await runStep(S.prog[R.line], R);
+      if (R.menu) break;
+      R.line = Math.max(0, R.next);
+      if (R.mode === 1) break;
+    }
+    if (R.line >= S.prog.length) { R.line = 0; R.log.push('ROBOT FINISHES PROGRAM'); }
+    msg(R.menu ? 'RUN ABORTED - RETURN TO MENU' : R.stop ? 'PROGRAM STOPPED' : 'PROGRAM ENDED', A.ok);
+  } catch (e) { R.log.push('ERROR: ' + e.message); msg('RUN ERROR: ' + e.message + '  (line ' + (R.cur + 1) + ')', A.err, 12000); }
+  finally { R.active = false; S.busy = false; S.runLine = R.line; }
+}
+async function doBrake() {
+  const rb = S.robot; if (!rb || rb.braked) return;
+  await rb.brake(); msg('BRAKE APPLIED - PRESS C TO CONTINUE / M TO RETURN TO MENU', A.warn, 120000);
+  if (S.run && S.run.active) S.run.braked = true;
+}
+async function doResume() {
+  const rb = S.robot; if (!rb.braked) return;
+  await rb.resume(); if (S.run) S.run.braked = false; msg('CONTINUING', A.ok);
+  if (!S.busy) await exclusive(async () => motionResult(await rb.waitDone()));
+}
+async function doMenuAfterBrake() {
+  const rb = S.robot; await rb.fixAfterBrake();
+  for (let m = 1; m <= 8; m++) rb.tgt[m] = rb.cnt[m];
+  rb.braked = false; if (S.run) { S.run.menu = true; S.run.braked = false; } msg('MOTION ABANDONED - COUNTERS UPDATED', A.ok);
+}
+function runKey(e) {
+  const R = S.run, k = e.key.toLowerCase();
+  if (k === 'b') { doBrake(); return; }
+  if (R.braked) { if (k === 'c') doResume(); else if (k === 'm') doMenuAfterBrake(); return; }
+  R.stop = true; msg('REGULAR STOP: ENDS AFTER THE CURRENT COMMAND', A.warn);
+}
+
+/* ---------- RUN PROGRAM / RUN CELL CONTROL ---------- */
+async function pollIO() {
+  if (S.polling || S.screen !== 'cell' || (S.busy && !S.io.isSim)) return; S.polling = true;
+  try {
+    const rb = S.robot; S.inState = S.inState || [];
+    for (let i = 1; i <= 8; i++) S.inState[i] = S.io.isSim ? !!S.io.ins[i] : await rb.input(i);
+  } catch (e) { /* sin respuesta */ }
+  S.polling = false;
+}
+function drawRun(cell) {
+  clearScr(A.norm); drawBars(cell ? 'RUN CELL CONTROL' : 'RUN PROGRAM MENU');
+  const R = S.run, n = S.prog.length, cur = R && R.active ? R.cur : S.runLine, rows = cell ? 6 : 10;
+  box(3, 1, 4 + rows, 50, A.dim);
+  const top = Math.max(0, Math.min(cur - Math.floor(rows / 2), n - rows));
+  for (let r = 0; r < rows; r++) {
+    const i = top + r; if (i >= n) break;
+    const on = i === cur; put(4 + r, 2, (on ? '►' : ' ') + String(i + 1).padStart(4) + '  ' + fmtIns(S.prog[i]).slice(0, 40), on ? A.hi : A.norm);
+  }
+  if (!n) put(5, 4, '(no program)', A.grey);
+  const m = ['[1] RUN SINGLE LINE', '[2] RUN SINGLE CYCLE', '[3] RUN CONTINUOUSLY', '[4] JUMP TO LINE ...', '[5]/[T] DISPLAY ON / OFF  (' + (S.display ? 'ON' : 'OFF') + ')'];
+  m.forEach((s, i) => putk(4 + i, 53, s, i + 1 === S.runMode ? A.hi : A.norm, i + 1 === S.runMode ? 0x7B : A.key));
+  put(cell ? 9 : 12, 53, "PRESS 'G' TO LET ROBOT RUN", A.yel); put(cell ? 10 : 13, 53, "PRESS 'B' FOR BRAKE", A.yel);
+  if (R && R.active) put(2, 36, R.braked ? 'BRAKED: C = CONTINUE  M = MENU' : 'RUNNING... (any key = stop)', R.braked ? A.warn : A.ok);
+  const log = R ? R.log.slice(cell ? -2 : -5) : [];
+  if (!cell) log.forEach((s, i) => put(15 + i, 2, s.slice(0, 76), A.ok));
+  if (cell) {
+    box(11, 1, 20, 78, A.dim);
+    put(11, 3, ' INPUTS ' + (S.io.isSim ? '(sim: Alt+1..8) ' : ''), A.yel); put(11, 41, ' OUTPUTS ', A.yel);
+    for (let i = 1; i <= 8; i++) {
+      const on = !!(S.inState && S.inState[i]); put(11 + i, 3, 'IN  ' + i + '  ' + (on ? '●' : '○') + ' ' + S.names.in[i][on ? 1 : 0].slice(0, 28), on ? A.ok : A.norm);
+      const o = !!S.robot.outs[i]; put(11 + i, 41, 'OUT ' + i + '  ' + (o ? '●' : '○') + ' ' + S.names.out[i][o ? 1 : 0].slice(0, 28), o ? A.ok : A.norm);
+    }
+    log.forEach((s, i) => put(21 + i, 2, s.slice(0, 76), A.ok));
+  }
+  drawPrompt();
+}
+const runScreen = cell => ({
+  enter() { if (cell) { S.inState = []; } },
+  draw() { drawRun(cell); },
+  async key(e) {
+    const k = e.key.toLowerCase();
+    if (e.key === 'Escape' || e.key === 'PageUp') { go('main'); return; }
+    if (k === '1' || k === '2' || k === '3') S.runMode = +k;
+    else if (k === '4') { const n = await askInt('JUMP TO LINE ...', { min: 1, max: Math.max(1, S.prog.length) }); if (n) S.runLine = n - 1; }
+    else if (k === '5') S.display = true; else if (k === 't') S.display = false;
+    else if (k === 'g') startRun();
+  }
+});
+SCREENS.run = runScreen(false); SCREENS.cell = runScreen(true);
+
+/* ---------- HOME ---------- */
+const HM = { msgs: [] };
+const AXN = ['', 'BASE', 'SHOULDER', 'ELBOW', 'WRIST PITCH', 'WRIST ROLL'];
+SCREENS.home = {
+  draw() {
+    clearScr(A.norm); drawBars('HOME MENU'); const rb = S.robot;
+    putk(4, 2, "PRESS '[G]' KEY TO SYNCHRONIZE THE ROBOT (hard home search)");
+    putk(6, 2, '[M]  Set arm LEVEL reference (arm extended and horizontal)');
+    putk(7, 2, '[H]  set present position as Home');
+    putk(8, 2, '[Z]  close gripper against its stop and set it to Zero');
+    put(10, 2, 'AXIS            STATE', A.yel);
+    for (let a = 1; a <= 5; a++) put(11 + a, 2, AXN[a].padEnd(16) + (rb.homedAxes[a] ? 'AT HOME' : 'NOT AT HOME'), rb.homedAxes[a] ? A.ok : A.grey);
+    HM.msgs.slice(-5).forEach((s, i) => put(11 + i, 38, s.slice(0, 40), s.startsWith('ROBOT IS NOT') ? A.err : A.ok));
+    drawCoords(18);
+    put(22, 1, '<ESC> RETURN TO MAIN MENU', A.grey); drawPrompt();
+  },
+  async key(e) {
+    const k = e.key.toLowerCase(), rb = S.robot;
+    if (e.key === 'Escape') { go('main'); return; }
+    if (k === 'g') {
+      if (!await askYN('THE ARM WILL MOVE SEARCHING FOR ITS LIMIT SWITCHES. CLEAR THE AREA. ARE YOU SURE')) return;
+      await exclusive(async () => {
+        HM.msgs = []; const r = await rb.homeAll([3, 2, 4, 5, 1], a => HM.msgs.push(AXN[a] + ' IS AT HOME'), ABORT);
+        if (r === 'ok') { HM.msgs.push('HOMING COMPLETED'); msg('HOMING COMPLETED', A.ok); }
+        else { HM.msgs.push('ROBOT IS NOT AT HOME !  (' + r + ')'); msg('ROBOT IS NOT AT HOME !', A.err, 9000); }
+      });
+    } else if (k === 'm') {
+      if (await askYN('ASSUMES THE ARM IS EXTENDED AND HORIZONTAL. CONTINUE')) { rb.setLevelRef(); HM.msgs.push('LEVEL REFERENCE SET (NOT A HARD HOME)'); msg('LEVEL REFERENCE SET', A.warn); }
+    } else if (k === 'h') {
+      if (await askYN('THIS CHANGES THE PHYSICAL LOCATION OF ALL POSITIONS. ARE YOU SURE')) { rb.setHomeHere(); HM.msgs.push('PRESENT POSITION SET AS HOME'); }
+    } else if (k === 'z') {
+      await exclusive(async () => { const r = await rb.gripperZero(ABORT); HM.msgs.push('GRIPPER SET TO ZERO'); if (!r.ok && !r.err) motionResult(r); });
+    }
+  }
+};
+
+/* ---------- I/O SETUP ---------- */
+const IOS = { sel: 0 };
+SCREENS.iosetup = {
+  draw() {
+    clearScr(A.norm); drawBars('I/O SETUP');
+    put(4, 2, 'INPUTS                    OFF text / ON text', A.yel); put(4, 42, 'OUTPUTS                   OFF text / ON text', A.yel);
+    for (let i = 1; i <= 8; i++) {
+      const si = IOS.sel === i - 1, so = IOS.sel === i + 7;
+      put(5 + i, 2, ('IN  ' + i + '  ' + S.names.in[i][0] + ' / ' + S.names.in[i][1]).slice(0, 36).padEnd(36), si ? A.hi : A.norm);
+      put(5 + i, 42, ('OUT ' + i + '  ' + S.names.out[i][0] + ' / ' + S.names.out[i][1]).slice(0, 36).padEnd(36), so ? A.hi : A.norm);
+    }
+    put(16, 2, 'Up/Down/Left/Right select    <Enter> edit texts    <ESC> return', A.grey); drawPrompt();
+  },
+  async key(e) {
+    if (e.key === 'Escape') { go('main'); return; }
+    if (e.key === 'ArrowDown') IOS.sel = (IOS.sel + 1) % 16; else if (e.key === 'ArrowUp') IOS.sel = (IOS.sel + 15) % 16;
+    else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') IOS.sel = (IOS.sel + 8) % 16;
+    else if (e.key === 'Enter') {
+      const out = IOS.sel >= 8, i = (IOS.sel % 8) + 1, tgt = out ? S.names.out : S.names.in;
+      const a = await promptLine((out ? 'OUT ' : 'IN ') + i + ' TEXT WHEN OFF:', { numeric: false, max: 24, def: tgt[i][0] }); if (a === null) return;
+      const b = await promptLine((out ? 'OUT ' : 'IN ') + i + ' TEXT WHEN ON:', { numeric: false, max: 24, def: tgt[i][1] }); if (b === null) return;
+      tgt[i] = [a || 'OFF', b || 'ON']; saveStore();
+    }
+  }
+};
+
+/* ---------- SETUP / COMM ---------- */
+const SET = { sel: 0 };
+function setupItems() {
+  const c = S.cfg, sg = v => (v > 0 ? '+  (counter up)' : '-  (counter down)');
+  const flip = k => () => { c.key[k] *= -1; saveStore(); };
+  const num = (label, get, set, o) => ({ l: label, v: get, act: async () => { const n = await askInt(label + ' ...', Object.assign({ def: get(), int: true }, o)); if (n != null) { set(n); saveStore(); } } });
+  return [
+    { l: 'Controller link', v: () => S.mode === 'ONLINE' ? 'ON-LINE (serial 9600 8N2)' : 'SIMULATION (off-line)', act: async () => { if (S.mode === 'ONLINE') await disconnectSerial(); else await connectSerial(); } },
+    { l: 'Key [1] moves BASE', v: () => sg(c.key.a1), act: flip('a1'), test: 1 },
+    { l: 'Key [2] moves SHOULDER', v: () => sg(c.key.a2), act: flip('a2'), test: 2 },
+    { l: 'Key [3] moves ELBOW', v: () => sg(c.key.a3), act: flip('a3'), test: 3 },
+    { l: 'Key [4] moves WRIST PITCH', v: () => sg(c.key.a4), act: flip('a4'), test: 4 },
+    { l: 'Key [5] moves WRIST ROLL', v: () => sg(c.key.a5), act: flip('a5'), test: 5 },
+    { l: 'Key [6] moves AXIS 6', v: () => sg(c.key.a6), act: flip('a6'), test: 6 },
+    { l: 'Key [7] moves AXIS 7', v: () => sg(c.key.a7), act: flip('a7'), test: 7 },
+    { l: 'OPEN gripper direction', v: () => sg(c.key.g), act: flip('g'), test: 8 },
+    num('Pulses per jog cycle', () => c.step, v => c.step = v, { min: 1, max: 400 }),
+    num('Jog cycle time (ms)', () => c.period, v => c.period = v, { min: 40, max: 1000 }),
+    { l: 'Floor guard', v: () => c.floor.on ? 'ON' : 'OFF', act: () => { c.floor.on = !c.floor.on; saveStore(); } },
+    num('Floor height (mm)', () => c.floor.z, v => c.floor.z = v, { min: -500, max: 500 }),
+    num('Floor margin (mm)', () => c.floor.margin, v => c.floor.margin = v, { min: 0, max: 100 }),
+    num('Gripper open travel (pulses)', () => c.grip.open, v => c.grip.open = v, { min: 100, max: 4000 }),
+    num('Homing speed (1-9)', () => c.homeSpeed, v => c.homeSpeed = v, { min: 1, max: 9 }),
+    num('Homing coarse step (pulses)', () => c.homeStep, v => c.homeStep = v, { min: 4, max: 120 }),
+    num('Simulator speed (pulses/s)', () => c.maxPps, v => c.maxPps = v, { min: 50, max: 5000 }),
+    { l: 'Reset all settings', v: () => '', act: async () => { if (await askYN('RESET SETTINGS')) { S.cfg = clone(DEF_CFG); if (S.robot) S.robot.cfg = S.cfg; saveStore(); } } }
+  ];
+}
+SCREENS.setup = {
+  draw() {
+    clearScr(A.norm); drawBars('SETUP / COMM  (web replica settings)');
+    const it = setupItems();
+    it.forEach((x, i) => { const r = 3 + i; put(r, 2, x.l.padEnd(34), SET.sel === i ? A.hi : A.norm); put(r, 37, String(x.v()).padEnd(38), SET.sel === i ? A.hi : A.yel); });
+    put(23, 2, 'Up/Down select  <Enter> change  T = test axis (20 pulses)  <ESC> return', A.grey);
+    drawPrompt();
+  },
+  async key(e) {
+    const it = setupItems(), k = e.key.toLowerCase();
+    if (e.key === 'Escape') { go('main'); return; }
+    if (e.key === 'ArrowDown') SET.sel = (SET.sel + 1) % it.length; else if (e.key === 'ArrowUp') SET.sel = (SET.sel + it.length - 1) % it.length;
+    else if (e.key === 'Enter') await it[SET.sel].act();
+    else if (k === 't' && it[SET.sel].test) {
+      const a = it[SET.sel].test;
+      if (S.mode === 'ONLINE' && !await askYN('THE AXIS WILL MOVE 20 PULSES. KEEP CLEAR AND HAND ON THE MOTOR SWITCH. CONTINUE')) return;
+      await exclusive(async () => {
+        const rb = S.robot;
+        if (a === 8) { const d = new Array(9).fill(0); d[8] = 20 * S.cfg.key.g; await rb.moveRel(d, 1, ABORT); }
+        else await rb.moveRel(rb.axisDeltas(a, 20 * S.cfg.key['a' + a]), 1, ABORT);
+        motionResult(await rb.waitDone()); msg('TEST DONE: THE FIRST KEY OF THIS PAIR MOVED THE AXIS THIS WAY', A.ok, 9000);
+      });
+    }
+  }
+};
+
+/* ---------- teclado ---------- */
+document.addEventListener('keydown', e => {
+  if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+  if (/^F\d+$/.test(e.key) || [' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Backspace', 'Tab'].includes(e.key) || (e.ctrlKey && /^[a-z]$/i.test(e.key) && !e.shiftKey && 'cvxa'.indexOf(e.key.toLowerCase()) < 0)) e.preventDefault();
+  if (e.altKey && /^[1-8]$/.test(e.key)) { if (S.io && S.io.isSim) { S.io.ins[+e.key] = !S.io.ins[+e.key]; msg('SIM INPUT ' + e.key + ' = ' + (S.io.ins[+e.key] ? 'ON' : 'OFF'), A.ok, 2500); } e.preventDefault(); return; }
+  if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)) return;
+  const k = (e.key || '').toLowerCase(); if (!e.repeat) S.keys[k] = true;
+  if (S.confirm) { if (!e.repeat) confirmKey(e); return; }
+  if (S.prompt) { promptKey(e); return; }
+  if (S.run && S.run.active) { if (!e.repeat) runKey(e); return; }
+  if (T.moving) { if (k === 'b' || k === ' ') doBrake(); return; }
+  if (S.busy) { if (k === 'b') doBrake(); else if (!e.repeat) { S.abortReq = true; } return; }
+  if (S.robot && S.robot.braked && (k === 'c' || k === 'm') && S.screen !== 'splash') { if (k === 'c') doResume(); else doMenuAfterBrake(); return; }
+  if (e.repeat && S.screen === 'teach') return;
+  const sc = SCREENS[S.screen]; if (sc && sc.key) sc.key(e);
+});
+document.addEventListener('keyup', e => {
+  const k = (e.key || '').toLowerCase(); S.keys[k] = false;
+  const sc = SCREENS[S.screen]; if (sc && sc.keyup) sc.keyup(e);
+});
+window.addEventListener('blur', () => { S.keys = {}; if (T.moving) stopMove(); });
+
+/* ---------- arranque ---------- */
+function frame() {
+  try {
+    const sc = SCREENS[S.screen]; sc.draw();
+    if (S.screen !== 'dos') { drawPrompt(); }
+    render();
+  } catch (e) { console.error(e); }
+}
+(async function init() {
+  loadStore(); S.mode = 'SIM'; await useSim(); go('splash');
+  const $ = id => document.getElementById(id);
+  $('btnConn').onclick = () => connectSerial();
+  $('btnDisc').onclick = () => disconnectSerial();
+  $('btnSim').onclick = async () => { if (S.mode === 'ONLINE') await disconnectSerial(); else await useSim(); };
+  $('btnBrake').onclick = () => doBrake();
+  $('btnResume').onclick = () => doResume();
+  $('btnFull').onclick = () => { const w = $('wrap'); if (document.fullscreenElement) document.exitFullscreen(); else if (w.requestFullscreen) w.requestFullscreen(); };
+  $('fileIn').onchange = ev => { const f = ev.target.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => importFile(rd.result, f.name); rd.readAsText(f); ev.target.value = ''; };
+  window.addEventListener('resize', fit); document.addEventListener('fullscreenchange', () => setTimeout(fit, 50));
+  setInterval(frame, 80); setInterval(saveStore, 4000); setInterval(pollIO, 700);
+  window.addEventListener('beforeunload', ev => { if (S.mode === 'ONLINE' || S.dirty) { ev.preventDefault(); ev.returnValue = ''; } });
+  fit(); frame(); setTimeout(fit, 300);
+})();
+
+</script>
+</body>
+</html>
